@@ -90,58 +90,6 @@ Then open [http://localhost:8501](http://localhost:8501) in a browser. The app r
 
 ---
 
-## Architecture
-
-### Data flow
-
-```
-GitHub (SSHOC/sshompitor) ──► data/full_items_*.json  (downloaded on demand)
-                                        │
-                                        ▼
-                          sshmarketplacelib.Util  (loaded once, cached as st.cache_resource)
-                │
-                ├── getContributors()     ──► Contributors page
-                ├── _load_snapshot()      ──► Duplicates / URL Checker
-                ├── getDuplicates()       ──► Item Duplicates tab
-                ├── getDuplicatedActors…  ──► Actor Duplicates tab
-                └── getAllProperties()    ──► Keywords page
-
-Live Marketplace API  ◄──► lib/api.py  ◄──► all write operations + actor verification
-```
-
-### Streamlit multi-page structure
-
-The app follows Streamlit's file-based page routing. `app.py` is the entry point (login). Each file in `pages/` becomes a navigation item. Page order is set by the filename prefix (`1_`, `2_`, etc.).
-
-### Session state
-
-Streamlit reruns the entire script on every user interaction. Persistent data is stored in `st.session_state`:
-
-| Key | Type | Set by | Used by |
-|---|---|---|---|
-| `authenticated` | `bool` | Login page | All pages (via `require_login()`) |
-| `bearer` | `str` | Login page | All API calls |
-| `env` | `dict` | Login page | All pages |
-| `actor_details` | `DataFrame` | Contributors / Duplicates | Contributors, Duplicates |
-| `actor_dup_summary` | `DataFrame` | Duplicates | Duplicates |
-| `actor_dup_full` | `DataFrame` | Duplicates | Duplicates |
-| `merged_groups` | `dict` | Duplicates | Duplicates (disables merge buttons) |
-| `expander_open` | `dict` | Duplicates | Duplicates (keeps expanders open after merge) |
-| `orphan_verified` | `dict` | Duplicates | Duplicates (orphan verification results) |
-| `url_check_input` | `DataFrame` | URL Checker | URL Checker |
-| `url_check_results` | `DataFrame` | URL Checker | URL Checker |
-| `keyword_vocab` | `DataFrame` | Keywords | Keywords |
-| `all_concepts_cache` | `DataFrame` | Keywords | Keywords |
-
-### Caching
-
-| Decorator | Used for | Invalidated when |
-|---|---|---|
-| `@st.cache_resource` | `Util()` instance (loads the ~72 MB snapshot once) | Snapshot refreshed from GitHub |
-| `@st.cache_data` | Per-page derived DataFrames | Snapshot refreshed, or explicitly via `.clear()` |
-
----
-
 ## Login & environments
 
 The login screen lets you choose between **Production** and **Stage** before signing in.
@@ -493,7 +441,7 @@ All functions that communicate with the live Marketplace API.
 
 **Keyword extraction column prefix.** `Util.getAllProperties()` from sshompitor prefixes item-level metadata columns with `ts_` (`ts_persistentId`, `ts_category`, `ts_label`). The keyword extraction function in this toolkit accounts for this prefix.
 
-**Item PUT requires full payload.** The Marketplace API does not support partial updates (PATCH). Every item update sends the complete item object as returned by GET, with only the target field modified. Fields not present in the GET response will be absent from the PUT and may be cleared on the server side.
+**Item PUT requires full payload.** Developed before PATCH was available on the API. Every item update sends the complete item object as returned by GET, with only the target field modified. Fields not present in the GET response will be absent from the PUT and may be cleared on the server side.
 
 ---
 
@@ -519,3 +467,56 @@ The updated property type code is not accepted by the API for the chosen vocabul
 
 **After merging actors, the group still appears in the results**
 The snapshot has not been refreshed. The merge is complete on the server, but the local snapshot still reflects the pre-merge state. Refresh the snapshot from GitHub and re-run duplicate detection.
+
+
+## Architecture
+
+### Data flow
+
+```
+GitHub (SSHOC/sshompitor) ──► data/full_items_*.json  (downloaded on demand)
+                                        │
+                                        ▼
+                          sshmarketplacelib.Util  (loaded once, cached as st.cache_resource)
+                │
+                ├── getContributors()     ──► Contributors page
+                ├── _load_snapshot()      ──► Duplicates / URL Checker
+                ├── getDuplicates()       ──► Item Duplicates tab
+                ├── getDuplicatedActors…  ──► Actor Duplicates tab
+                └── getAllProperties()    ──► Keywords page
+
+Live Marketplace API  ◄──► lib/api.py  ◄──► all write operations + actor verification
+```
+
+### Streamlit multi-page structure
+
+The app follows Streamlit's file-based page routing. `app.py` is the entry point (login). Each file in `pages/` becomes a navigation item. Page order is set by the filename prefix (`1_`, `2_`, etc.).
+
+### Session state
+
+Streamlit reruns the entire script on every user interaction. Persistent data is stored in `st.session_state`:
+
+| Key | Type | Set by | Used by |
+|---|---|---|---|
+| `authenticated` | `bool` | Login page | All pages (via `require_login()`) |
+| `bearer` | `str` | Login page | All API calls |
+| `env` | `dict` | Login page | All pages |
+| `actor_details` | `DataFrame` | Contributors / Duplicates | Contributors, Duplicates |
+| `actor_dup_summary` | `DataFrame` | Duplicates | Duplicates |
+| `actor_dup_full` | `DataFrame` | Duplicates | Duplicates |
+| `merged_groups` | `dict` | Duplicates | Duplicates (disables merge buttons) |
+| `expander_open` | `dict` | Duplicates | Duplicates (keeps expanders open after merge) |
+| `orphan_verified` | `dict` | Duplicates | Duplicates (orphan verification results) |
+| `url_check_input` | `DataFrame` | URL Checker | URL Checker |
+| `url_check_results` | `DataFrame` | URL Checker | URL Checker |
+| `keyword_vocab` | `DataFrame` | Keywords | Keywords |
+| `all_concepts_cache` | `DataFrame` | Keywords | Keywords |
+
+### Caching
+
+| Decorator | Used for | Invalidated when |
+|---|---|---|
+| `@st.cache_resource` | `Util()` instance (loads the ~72 MB snapshot once) | Snapshot refreshed from GitHub |
+| `@st.cache_data` | Per-page derived DataFrames | Snapshot refreshed, or explicitly via `.clear()` |
+
+---
