@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 from lib.auth import require_login
 from lib.mplib import get_util
-from lib.snapshot import render_data_status
+from lib.snapshot import render_data_status, require_snapshot
 from lib.api import fetch_all_actors
 
 require_login()
@@ -19,6 +19,7 @@ st.caption(f"Environment: **{env['label']}** — {env['api_url']}")
 
 MP_SERVER = env["mp_url"]
 
+require_snapshot()
 
 @st.cache_data(show_spinner="Loading contributors…")
 def load_contributors() -> pd.DataFrame:

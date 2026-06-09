@@ -7,7 +7,7 @@ import pandas as pd
 from lib.auth import require_login
 from lib.mplib import get_util
 from lib.api import fetch_all_keyword_concepts, fetch_all_concepts, delete_concept, fix_item_keyword
-from lib.snapshot import render_data_status
+from lib.snapshot import render_data_status, require_snapshot
 
 require_login()
 
@@ -17,6 +17,7 @@ env = st.session_state["env"]
 st.title("Keyword Curation")
 st.caption(f"Environment: **{env['label']}** — {env['api_url']}")
 
+require_snapshot()
 render_data_status()
 
 

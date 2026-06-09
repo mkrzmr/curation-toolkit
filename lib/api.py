@@ -298,6 +298,71 @@ def delete_concept(concept_code: str, vocab_code: str = "sshoc-keyword") -> tupl
         return False, f"Request failed: {e}"
 
 
+_CATEGORY_FETCH = [
+    ("tools-services",     "tools"),
+    ("publications",       "publications"),
+    ("training-materials", "trainingMaterials"),
+    ("workflows",          "workflows"),
+    ("datasets",           "datasets"),
+]
+
+
+def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool, str]:
+    """
+    Fetch all items from all 5 categories and save as full_items_{ts}.json.
+    Returns (success, message).
+    """
+    import json
+    import time as _time
+    import pathlib as _pathlib
+
+    headers = {"Authorization": bearer}
+    all_items: list = []
+    n_cats = len(_CATEGORY_FETCH)
+    bar = st.progress(0.0, text="Starting…")
+
+    for cat_idx, (path, items_key) in enumerate(_CATEGORY_FETCH):
+        url = f"{api_url}/api/{path}"
+        try:
+            resp = requests.get(f"{url}?perpage=50&page=1", headers=headers, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            bar.empty()
+            return False, f"Failed to fetch {path}: {e}"
+
+        total_pages = data.get("pages", 1)
+        all_items.extend(data.get(items_key, []))
+        bar.progress(
+            (cat_idx + 1 / max(total_pages, 1)) / n_cats,
+            text=f"{path}: page 1 / {total_pages}",
+        )
+
+        for page in range(2, total_pages + 1):
+            try:
+                r = requests.get(f"{url}?perpage=50&page={page}", headers=headers, timeout=20)
+                r.raise_for_status()
+                all_items.extend(r.json().get(items_key, []))
+            except Exception as e:
+                bar.empty()
+                return False, f"Failed fetching {path} page {page}: {e}"
+            bar.progress(
+                (cat_idx + page / total_pages) / n_cats,
+                text=f"{path}: page {page} / {total_pages}",
+            )
+
+    bar.empty()
+    ts = int(_time.time())
+    out_path = _pathlib.Path(data_dir) / f"full_items_{ts}.json"
+    try:
+        with open(out_path, "w", encoding="utf-8") as fh:
+            json.dump(all_items, fh)
+    except Exception as e:
+        return False, f"Failed to save snapshot: {e}"
+
+    return True, f"Created {out_path.name} with {len(all_items)} items."
+
+
 def merge_actors(keep_id: int, merge_ids: list) -> tuple[bool, str]:
     """
     POST /api/actors/{keep_id}/merge?with={merge_ids}

@@ -84,6 +84,64 @@ def fetch_latest_from_github() -> tuple[bool, str]:
     return True, f"Downloaded {latest_entry['name']} ({file_size // 1_048_576} MB)."
 
 
+def require_snapshot() -> None:
+    """
+    Stop page rendering and show a recovery UI if no snapshot is present in data/.
+    Call this at the top of any page that needs snapshot data.
+    """
+    path, _, _ = get_latest_snapshot_info()
+    if path is not None:
+        return  # snapshot present — proceed
+
+    st.error("No snapshot found in data/")
+    st.markdown(
+        "A local snapshot is required. "
+        "Download the latest archived copy from GitHub (fast) or fetch live data "
+        "directly from the Marketplace API."
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Download from GitHub")
+        st.caption("Recommended — uses the most recent snapshot from the sshompitor repository.")
+        if st.button("Download latest snapshot", use_container_width=True, type="primary"):
+            with st.spinner("Downloading…"):
+                ok, msg = fetch_latest_from_github()
+            if ok:
+                st.success(msg)
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.rerun()
+            else:
+                st.error(msg)
+
+    with col2:
+        st.subheader("Fetch fresh from API")
+        st.caption(
+            "Fetches live data from the Marketplace API. "
+            "Takes several minutes. Requires an active login."
+        )
+        env = st.session_state.get("env")
+        bearer = st.session_state.get("bearer")
+        if env and bearer:
+            if st.button("Create fresh snapshot", use_container_width=True):
+                from lib.api import create_snapshot_from_api
+                with st.spinner("Fetching all items from the Marketplace API…"):
+                    ok, msg = create_snapshot_from_api(env["api_url"], bearer, _DATA_DIR)
+                if ok:
+                    st.success(msg)
+                    st.cache_data.clear()
+                    st.cache_resource.clear()
+                    st.rerun()
+                else:
+                    st.error(msg)
+        else:
+            st.info("Log in first to enable the API fetch option.")
+
+    st.stop()
+
+
 def render_data_status() -> None:
     """Render data-age badge and GitHub refresh button in the sidebar."""
     with st.sidebar:
