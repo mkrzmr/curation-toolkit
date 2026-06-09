@@ -126,6 +126,178 @@ def delete_actor(actor_id: int) -> tuple[bool, str]:
         return False, f"Request failed: {e}"
 
 
+def fetch_all_keyword_concepts(api_url: str, bearer: str) -> pd.DataFrame:
+    """
+    GET /api/concept-search?types=keyword — paginate through all pages.
+    No auth required for reads, but bearer is passed for consistency.
+    Returns a DataFrame with columns: code, label, uri, notation, candidate, definition.
+    """
+    url = f"{api_url}/api/concept-search"
+    headers = {"Authorization": bearer}
+    params = {"types": "keyword", "perpage": 100, "page": 1}
+
+    resp = requests.get(url, headers=headers, params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+
+    total_pages = data.get("pages", 1)
+    all_concepts = list(data.get("concepts", []))
+
+    if total_pages > 1:
+        bar = st.progress(1 / total_pages, text=f"Loading concepts… 1 / {total_pages}")
+        for page in range(2, total_pages + 1):
+            r = requests.get(url, headers=headers,
+                             params={**params, "page": page}, timeout=15)
+            r.raise_for_status()
+            all_concepts.extend(r.json().get("concepts", []))
+            bar.progress(page / total_pages, text=f"Loading concepts… {page} / {total_pages}")
+        bar.empty()
+
+    if not all_concepts:
+        return pd.DataFrame(columns=["code", "label", "uri", "notation", "candidate", "definition"])
+
+    df = pd.json_normalize(all_concepts)
+    for col in ["code", "label", "uri", "notation", "candidate", "definition"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df[["code", "label", "uri", "notation", "candidate", "definition"]].copy()
+
+
+def fetch_all_concepts(api_url: str, bearer: str) -> pd.DataFrame:
+    """
+    GET /api/concept-search (all types, all vocabularies) — paginated.
+    Returns a DataFrame with columns: code, label, uri, notation,
+    candidate, definition, vocabulary_code, type_code.
+    """
+    url = f"{api_url}/api/concept-search"
+    headers = {"Authorization": bearer}
+    params = {"perpage": 100, "page": 1}
+
+    resp = requests.get(url, headers=headers, params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+
+    total_pages = data.get("pages", 1)
+    all_concepts = list(data.get("concepts", []))
+
+    bar = st.progress(1 / total_pages, text=f"Loading concepts… 1 / {total_pages}")
+    for page in range(2, total_pages + 1):
+        r = requests.get(url, headers=headers, params={**params, "page": page}, timeout=15)
+        r.raise_for_status()
+        all_concepts.extend(r.json().get("concepts", []))
+        bar.progress(page / total_pages, text=f"Loading concepts… {page} / {total_pages}")
+    bar.empty()
+
+    if not all_concepts:
+        return pd.DataFrame(columns=["code", "label", "uri", "notation",
+                                     "candidate", "definition", "vocabulary_code", "type_code"])
+
+    df = pd.json_normalize(all_concepts)
+    if "vocabulary.code" in df.columns:
+        df = df.rename(columns={"vocabulary.code": "vocabulary_code"})
+    elif "vocabulary_code" not in df.columns:
+        df["vocabulary_code"] = pd.NA
+
+    # types is a list; take the code of the first entry
+    if "types" in df.columns:
+        df["type_code"] = df["types"].apply(
+            lambda t: t[0]["code"] if isinstance(t, list) and t else pd.NA
+        )
+    else:
+        df["type_code"] = pd.NA
+
+    for col in ["code", "label", "uri", "notation", "candidate", "definition"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    return df[["code", "label", "uri", "notation",
+               "candidate", "definition", "vocabulary_code", "type_code"]].copy()
+
+
+_CATEGORY_PATH = {
+    "tool-or-service":   "tools-services",
+    "training-material": "training-materials",
+    "dataset":           "datasets",
+    "publication":       "publications",
+    "workflow":          "workflows",
+    "step":              "steps",
+}
+
+
+def _item_url(api_url: str, category: str, persistent_id: str) -> str:
+    path = _CATEGORY_PATH.get(category, category + "s")
+    return f"{api_url}/api/{path}/{persistent_id}"
+
+
+def get_item(category: str, persistent_id: str, api_url: str, bearer: str) -> dict:
+    resp = requests.get(
+        _item_url(api_url, category, persistent_id),
+        headers={"Authorization": bearer},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def put_item(category: str, persistent_id: str, item_data: dict,
+             api_url: str, bearer: str) -> tuple[bool, str]:
+    resp = requests.put(
+        _item_url(api_url, category, persistent_id),
+        headers={"Content-Type": "application/json", "Authorization": bearer},
+        json=item_data,
+        timeout=30,
+    )
+    if resp.status_code in (200, 201):
+        return True, "Updated."
+    return False, f"HTTP {resp.status_code}: {resp.text[:300]}"
+
+
+def fix_item_keyword(
+    category: str,
+    persistent_id: str,
+    old_concept_code: str,
+    new_type_code: str,
+    new_concept: dict,
+    api_url: str,
+    bearer: str,
+) -> tuple[bool, str]:
+    """
+    GET the item, replace every property whose type=keyword and
+    concept.code=old_concept_code with new_type_code / new_concept, PUT back.
+    """
+    try:
+        item = get_item(category, persistent_id, api_url, bearer)
+    except Exception as e:
+        return False, f"GET failed: {e}"
+
+    changed = False
+    for prop in item.get("properties", []):
+        if (prop.get("type", {}).get("code") == "keyword"
+                and prop.get("concept", {}).get("code") == old_concept_code):
+            prop["type"]["code"] = new_type_code
+            prop["concept"] = new_concept
+            changed = True
+
+    if not changed:
+        return False, "Property not found in item."
+
+    return put_item(category, persistent_id, item, api_url, bearer)
+
+
+def delete_concept(concept_code: str, vocab_code: str = "sshoc-keyword") -> tuple[bool, str]:
+    """DELETE /api/vocabularies/{vocab_code}/concepts/{concept_code}."""
+    env = st.session_state["env"]
+    bearer = st.session_state["bearer"]
+    url = f"{env['api_url']}/api/vocabularies/{vocab_code}/concepts/{concept_code}"
+    try:
+        resp = requests.delete(url, headers={"Authorization": bearer}, timeout=15)
+        if resp.status_code in (200, 204):
+            return True, f"Concept '{concept_code}' deleted."
+        return False, f"API returned {resp.status_code}: {resp.text[:200]}"
+    except requests.RequestException as e:
+        return False, f"Request failed: {e}"
+
+
 def merge_actors(keep_id: int, merge_ids: list) -> tuple[bool, str]:
     """
     POST /api/actors/{keep_id}/merge?with={merge_ids}
