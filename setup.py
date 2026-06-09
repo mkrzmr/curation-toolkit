@@ -1,28 +1,19 @@
 """
-Run once before starting the app:
-    python setup.py
+Run once after installing dependencies:
+    python3 setup.py
 
-Creates symlinks so the app reads sshompitor's data and config without copying.
+Creates the data/ directory where snapshots are stored.
+Snapshots are downloaded automatically via the "Get latest data from GitHub"
+button in the sidebar, or you can place full_items_*.json files here manually.
 """
-import os
 import pathlib
 
-BASE = pathlib.Path(__file__).parent
-SSHOMPITOR = BASE.parent / "sshompitor"
+DATA = pathlib.Path(__file__).parent / "data"
 
-links = {
-    BASE / "data": SSHOMPITOR / "data",
-    BASE / "config.yaml": SSHOMPITOR / "config.yaml",
-}
-
-for link, target in links.items():
-    if not target.exists():
-        print(f"WARNING: target does not exist: {target}")
-        continue
-    if link.exists() or link.is_symlink():
-        print(f"Already exists, skipping: {link.name}")
-    else:
-        link.symlink_to(target)
-        print(f"Created symlink: {link.name} -> {target}")
+if DATA.exists():
+    print("data/ already exists — nothing to do.")
+else:
+    DATA.mkdir()
+    print("Created data/")
 
 print("Setup complete.")

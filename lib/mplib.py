@@ -1,13 +1,15 @@
 import sys
 import pathlib
-
-# Make sshompitor importable without installing it
-_SSHOMPITOR = pathlib.Path(__file__).parent.parent.parent / "sshompitor"
-if str(_SSHOMPITOR) not in sys.path:
-    sys.path.insert(0, str(_SSHOMPITOR))
-
 import streamlit as st
-from sshmarketplacelib.helper import Util  # noqa: E402
+
+try:
+    from sshmarketplacelib.helper import Util
+except ImportError:
+    # Fall back to a sibling sshompitor clone if the package is not pip-installed
+    _SSHOMPITOR = pathlib.Path(__file__).parent.parent.parent / "sshompitor"
+    if str(_SSHOMPITOR) not in sys.path:
+        sys.path.insert(0, str(_SSHOMPITOR))
+    from sshmarketplacelib.helper import Util
 
 
 @st.cache_resource(show_spinner="Loading Marketplace snapshot…")

@@ -44,8 +44,9 @@ The toolkit is intended for Marketplace **moderators and administrators**. All w
 | Requirement | Notes |
 |---|---|
 | Python 3.10+ | Tested on 3.10–3.12 |
-| [sshompitor](https://github.com/SSHOC/sshompitor) | Must be cloned as a **sibling directory** at `../sshompitor/` |
 | Marketplace account | Moderator or administrator role required for write operations |
+
+No local clone of sshompitor is required. The `sshmarketplacelib` Python package is installed directly from GitHub as part of the normal dependency install, and a bundled `config.yaml` provides the configuration it needs. Snapshot data is downloaded automatically on first use.
 
 ---
 
@@ -57,22 +58,25 @@ The toolkit is intended for Marketplace **moderators and administrators**. All w
 pip install -r requirements.txt
 ```
 
-The required packages are: `streamlit>=1.35`, `pandas`, `numpy`, `pyyaml`, `pillow`, `requests`, `fastparquet`.
+This installs all required packages including `sshmarketplacelib` (pulled directly from the [sshompitor GitHub repository](https://github.com/SSHOC/sshompitor)):
 
-### 2. Create symlinks
+```
+streamlit>=1.35, pandas, numpy, pyyaml, pillow, requests, fastparquet, sshmarketplacelib
+```
+
+### 2. Create the data directory
 
 ```bash
 python3 setup.py
 ```
 
-This creates two symlinks in the project root:
+This creates the `data/` directory where snapshot files will be stored. That is all — no symlinks or local sshompitor clone required.
 
-| Symlink | Points to | Purpose |
-|---|---|---|
-| `data/` | `../sshompitor/data/` | Snapshot JSON files |
-| `config.yaml` | `../sshompitor/config.yaml` | sshompitor configuration |
+### 3. Download the first snapshot
 
-The app reads snapshots and config directly from sshompitor without copying any data. If your sshompitor clone is in a different location, edit the `SSHOMPITOR` path in `setup.py` before running it.
+Start the app (see below), log in, and click **Get latest data from GitHub** in the sidebar. This downloads the current snapshot (~70 MB) from the sshompitor repository automatically.
+
+Alternatively, place any `full_items_*.json` file in the `data/` directory manually.
 
 ---
 
@@ -91,11 +95,10 @@ Then open [http://localhost:8501](http://localhost:8501) in a browser. The app r
 ### Data flow
 
 ```
-sshompitor/data/full_items_*.json
-        │
-        │ symlink
-        ▼
-data/ ──► sshmarketplacelib.Util  (loaded once, cached as st.cache_resource)
+GitHub (SSHOC/sshompitor) ──► data/full_items_*.json  (downloaded on demand)
+                                        │
+                                        ▼
+                          sshmarketplacelib.Util  (loaded once, cached as st.cache_resource)
                 │
                 ├── getContributors()     ──► Contributors page
                 ├── _load_snapshot()      ──► Duplicates / URL Checker
@@ -497,7 +500,7 @@ All functions that communicate with the live Marketplace API.
 ## Troubleshooting
 
 **`ModuleNotFoundError: No module named 'sshmarketplacelib'`**
-The sshompitor repository is not in the expected location. Check that it is cloned at `../sshompitor/` relative to this project, or edit the `_SSHOMPITOR` path in `lib/mplib.py`.
+The package was not installed. Run `pip install -r requirements.txt`. If pip cannot reach GitHub, install manually: `pip install git+https://github.com/SSHOC/sshompitor.git#egg=sshmarketplacelib`. As a last resort, clone sshompitor into `../sshompitor/` — `lib/mplib.py` will find it automatically.
 
 **`No snapshot found in data/`**
 The `data/` symlink does not exist or points to an empty directory. Run `python3 setup.py` and check that `../sshompitor/data/` contains `full_items_*.json` files.

@@ -1,0 +1,41 @@
+# Config required by sshmarketplacelib.Util.
+# API credentials here are NOT used by the curation toolkit — it manages its
+# own authentication via the login screen. Keep this file as-is.
+
+DEBUG: True
+
+API:
+  SERVER: https://marketplace-api.sshopencloud.eu/
+  USER: unused
+  PASSWORD: unused
+
+MARKETPLACE:
+  SERVER: https://marketplace.sshopencloud.eu/
+
+DATASET_ENTRYPOINTS:
+    toolsandservices: api/tools-services
+    publications: api/publications
+    trainingmaterials: api/training-materials
+    workflows: api/workflows
+    datasets: api/datasets
+    actors: api/actors
+    list_of_properties: api/property-types?perpage=100
+    login: api/auth/sign-in
+    keyword: api/concept-search?types=keyword&q=
+    concepts: api/concept-search
+
+CATEGORIES:
+    - toolsandservices
+    - publications
+    - trainingmaterials
+    - workflows
+    - datasets
+
+EMPTY_DESCRIPTION_VAL: No description provided.
+
+CATEGORY_FILTER_VALUES:
+    toolsandservices: tool-or-service
+    publications: publication
+    trainingmaterials: training-material
+    workflows: workflow
+    datasets: dataset
