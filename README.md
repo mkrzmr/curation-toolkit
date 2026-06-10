@@ -126,8 +126,10 @@ Lists every `full_items_*.json` file in `data/` with its date, age, and size. Th
 
 | Button | What it does |
 |---|---|
-| **Download latest snapshot** | Queries the GitHub Contents API for the newest snapshot in the sshompitor repository and streams it to `data/`. Fast (typically a few seconds). |
+| **Download latest snapshot** | Queries the GitHub Contents API for the newest snapshot in the sshompitor repository and streams it to `data/`. Fast (typically a few seconds). **Production data only.** |
 | **Create fresh snapshot** | Fetches all items from the live Marketplace API across all five categories (tools, publications, training materials, workflows, datasets) and saves a new `full_items_{timestamp}.json`. Takes several minutes. |
+
+> **Stage environment:** the GitHub snapshot archive only contains Production data. When working on Stage, always use **Create fresh snapshot** to build a snapshot from the Stage API. The UI highlights this option as primary and shows a reminder when Stage is selected.
 
 After either operation, all page caches are cleared automatically and the page reloads.
 
@@ -424,6 +426,8 @@ A **data age badge** appears in the sidebar of every page:
 - **Orange** — snapshot is 3 or more days old
 
 If no snapshot is found when navigating to a tool page, a full-page prompt appears with options to download from GitHub or create from the API. This prevents confusing errors from pages that require snapshot data.
+
+> **Stage environment:** the GitHub archive contains Production snapshots only. When working on Stage, use **Create fresh snapshot** on the Data Source page to build a snapshot from the Stage API.
 
 A stale snapshot affects:
 - **Orphaned actors** — recently-contributed actors may appear as candidates

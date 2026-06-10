@@ -95,15 +95,27 @@ st.divider()
 # ── Refresh actions ───────────────────────────────────────────────────────────
 st.subheader("Get data")
 
+is_stage = env["label"] != "Production"
+
+if is_stage:
+    st.info(
+        "The GitHub snapshot archive contains **Production data only**. "
+        "For Stage, use **Fetch fresh from API** to build a snapshot from the Stage environment."
+    )
+
 col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("**Download from GitHub**")
     st.caption(
-        "Downloads the latest snapshot archived in the sshompitor repository. "
-        "Fast — typically a few seconds."
+        "Downloads the latest snapshot from the sshompitor repository. "
+        "Fast — typically a few seconds. **Production data only.**"
     )
-    if st.button("Download latest snapshot", use_container_width=True, type="primary"):
+    if st.button(
+        "Download latest snapshot",
+        use_container_width=True,
+        type="secondary" if is_stage else "primary",
+    ):
         with st.spinner("Downloading…"):
             ok, msg = fetch_latest_from_github()
         if ok:
@@ -118,9 +130,14 @@ with col2:
     st.markdown("**Fetch fresh from API**")
     st.caption(
         "Queries the live Marketplace API and builds a new snapshot. "
-        "Takes several minutes. Use when you need data newer than what's on GitHub."
+        "Takes several minutes. "
+        + ("**Recommended for Stage.**" if is_stage else "Use when you need data newer than what's on GitHub.")
     )
-    if st.button("Create fresh snapshot", use_container_width=True):
+    if st.button(
+        "Create fresh snapshot",
+        use_container_width=True,
+        type="primary" if is_stage else "secondary",
+    ):
         with st.spinner("Fetching all items from the Marketplace API…"):
             ok, msg = create_snapshot_from_api(env["api_url"], st.session_state["bearer"], _DATA_DIR)
         if ok:
