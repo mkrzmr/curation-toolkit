@@ -143,7 +143,8 @@ def require_snapshot() -> None:
 
 
 def render_data_status() -> None:
-    """Render data-age badge and GitHub refresh button in the sidebar."""
+    """Render data-age badge, GitHub refresh button, and log indicator in the sidebar."""
+    from lib.logger import get_log
     with st.sidebar:
         st.divider()
         path, age, snapshot_dt = get_latest_snapshot_info()
@@ -180,3 +181,7 @@ def render_data_status() -> None:
                 st.rerun()
             else:
                 st.sidebar.error(msg)
+
+        n_log = len(get_log())
+        if n_log:
+            st.sidebar.caption(f"Session log: {n_log} entr{'y' if n_log == 1 else 'ies'}")

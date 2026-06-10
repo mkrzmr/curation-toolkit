@@ -2,6 +2,7 @@ import time
 import requests
 import pandas as pd
 import streamlit as st
+from lib.logger import log_action, log_api
 
 
 def fetch_all_actors(api_url: str, bearer: str) -> pd.DataFrame:
@@ -38,7 +39,9 @@ def fetch_all_actors(api_url: str, bearer: str) -> pd.DataFrame:
     df["item_count"] = df["items"].apply(
         lambda x: len(x) if isinstance(x, list) else (0 if pd.isna(x) else int(x))
     )
-    return df[["id", "name", "email", "website", "item_count"]].copy()
+    result = df[["id", "name", "email", "website", "item_count"]].copy()
+    log_action(f"Fetched {len(result)} actors from API ({api_url})")
+    return result
 
 
 def _check_one_actor(actor_id: int, api_url: str, bearer: str, retries: int = 3) -> tuple[int, bool | None]:
@@ -109,6 +112,12 @@ def verify_orphans(
             time.sleep(0.3)  # brief pause between batches
 
     bar.empty()
+    orphaned = sum(1 for v in results.values() if v is False)
+    uncertain = sum(1 for v in results.values() if v is None)
+    log_action(
+        f"Verified {total} actor candidates — "
+        f"{orphaned} orphaned, {uncertain} uncertain"
+    )
     return results
 
 
@@ -119,10 +128,20 @@ def delete_actor(actor_id: int) -> tuple[bool, str]:
     url = f"{env['api_url']}/api/actors/{actor_id}?force=false"
     try:
         resp = requests.delete(url, headers={"Authorization": bearer}, timeout=15)
-        if resp.status_code in (200, 204):
+        ok = resp.status_code in (200, 204)
+        log_api(
+            "DELETE", url,
+            f"Delete actor {actor_id} (force=false)",
+            status=resp.status_code,
+            response=resp.text[:300],
+            ok=ok,
+        )
+        if ok:
             return True, f"Actor {actor_id} deleted."
         return False, f"API returned {resp.status_code}: {resp.text[:200]}"
     except requests.RequestException as e:
+        log_api("DELETE", url, f"Delete actor {actor_id} — request failed", status="error",
+                response=str(e), ok=False)
         return False, f"Request failed: {e}"
 
 
@@ -241,13 +260,25 @@ def get_item(category: str, persistent_id: str, api_url: str, bearer: str) -> di
 
 def put_item(category: str, persistent_id: str, item_data: dict,
              api_url: str, bearer: str) -> tuple[bool, str]:
+    import json as _json
+    url = _item_url(api_url, category, persistent_id)
     resp = requests.put(
-        _item_url(api_url, category, persistent_id),
+        url,
         headers={"Content-Type": "application/json", "Authorization": bearer},
         json=item_data,
         timeout=30,
     )
-    if resp.status_code in (200, 201):
+    ok = resp.status_code in (200, 201)
+    log_api(
+        "PUT", url,
+        f"Update {category}/{persistent_id}",
+        status=resp.status_code,
+        request=_json.dumps({"persistentId": persistent_id, "category": category,
+                             "label": item_data.get("label", "")})[:500],
+        response=resp.text[:300],
+        ok=ok,
+    )
+    if ok:
         return True, "Updated."
     return False, f"HTTP {resp.status_code}: {resp.text[:300]}"
 
@@ -285,16 +316,31 @@ def fix_item_keyword(
 
 
 def delete_concept(concept_code: str, vocab_code: str = "sshoc-keyword") -> tuple[bool, str]:
-    """DELETE /api/vocabularies/{vocab_code}/concepts/{concept_code}."""
+    """
+    DELETE /api/vocabularies/{vocab_code}/concepts/{concept_code}?force=true
+
+    force=true is required when the concept is referenced by existing item properties;
+    the API will also remove those property references from the affected items.
+    """
     env = st.session_state["env"]
     bearer = st.session_state["bearer"]
-    url = f"{env['api_url']}/api/vocabularies/{vocab_code}/concepts/{concept_code}"
+    url = f"{env['api_url']}/api/vocabularies/{vocab_code}/concepts/{concept_code}?force=true"
     try:
         resp = requests.delete(url, headers={"Authorization": bearer}, timeout=15)
-        if resp.status_code in (200, 204):
+        ok = resp.status_code in (200, 204)
+        log_api(
+            "DELETE", url,
+            f"Delete concept '{concept_code}' from vocab '{vocab_code}' (force=true)",
+            status=resp.status_code,
+            response=resp.text[:300],
+            ok=ok,
+        )
+        if ok:
             return True, f"Concept '{concept_code}' deleted."
         return False, f"API returned {resp.status_code}: {resp.text[:200]}"
     except requests.RequestException as e:
+        log_api("DELETE", url, f"Delete concept '{concept_code}' — request failed",
+                status="error", response=str(e), ok=False)
         return False, f"Request failed: {e}"
 
 
@@ -358,8 +404,11 @@ def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool,
         with open(out_path, "w", encoding="utf-8") as fh:
             json.dump(all_items, fh)
     except Exception as e:
+        log_action(f"Snapshot creation failed: {e}", ok=False)
         return False, f"Failed to save snapshot: {e}"
 
+    msg = f"Created snapshot {out_path.name} with {len(all_items)} items from {api_url}"
+    log_action(msg)
     return True, f"Created {out_path.name} with {len(all_items)} items."
 
 
@@ -378,8 +427,18 @@ def merge_actors(keep_id: int, merge_ids: list) -> tuple[bool, str]:
             headers={"Content-Type": "application/json", "Authorization": bearer},
             timeout=15,
         )
-        if resp.status_code == 200:
+        ok = resp.status_code == 200
+        log_api(
+            "POST", url,
+            f"Merge actor(s) {merge_ids} into {keep_id}",
+            status=resp.status_code,
+            response=resp.text[:300],
+            ok=ok,
+        )
+        if ok:
             return True, f"Actor(s) {merge_ids} merged into {keep_id}."
         return False, f"API returned {resp.status_code}: {resp.text[:200]}"
     except requests.RequestException as e:
+        log_api("POST", url, f"Merge actors {merge_ids} into {keep_id} — request failed",
+                status="error", response=str(e), ok=False)
         return False, f"Request failed: {e}"

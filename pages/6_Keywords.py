@@ -93,6 +93,14 @@ with tab_unused:
         "Concepts registered in the vocabulary but not used on any item in the snapshot. "
         "**Candidate** entries were submitted by users and may not have been formally reviewed."
     )
+    st.info(
+        "Deletion uses `force=true`. "
+        "The API keeps a full version history of every item, and older revisions may still "
+        "reference a keyword even after it has been removed from the current version. "
+        "The API counts those historical references as 'in use' and refuses a plain delete. "
+        "`force=true` removes the concept from the vocabulary and clears any lingering "
+        "references across all item versions."
+    )
     if unused.empty:
         st.success("Every vocabulary concept is used by at least one item.")
     else:
@@ -133,11 +141,13 @@ with tab_unused:
 
         if to_delete:
             st.error(
-                f"**{len(to_delete)} concept(s) selected for deletion.** "
-                "This cannot be undone."
+                f"**{len(to_delete)} concept(s) selected for deletion (force=true).** "
+                "This removes the concept from the vocabulary and strips it from any item "
+                "that references it. This cannot be undone."
             )
             confirmed = st.checkbox(
-                f"I understand that {len(to_delete)} concept(s) will be permanently deleted",
+                f"I understand that {len(to_delete)} concept(s) will be permanently deleted "
+                "and any historical item-version references will be cleared",
                 key="unused_confirm",
             )
             if st.button(
@@ -259,9 +269,11 @@ with tab_dupes:
             suffixes=("_kw", "_other"),
         ).drop(columns=["_norm"])
 
+        # Only show keywords that are actually used — unused ones cannot be fixed here
+        matches = matches[matches["items_using"] > 0]
         matches = matches.sort_values(["items_using", "label_kw"], ascending=[False, True])
 
-        st.metric("Keywords also found in another vocabulary", len(matches))
+        st.metric("Used keywords also found in another vocabulary", len(matches))
 
         if matches.empty:
             st.success("No keyword labels overlap with concepts in other vocabularies.")

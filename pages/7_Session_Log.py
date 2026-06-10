@@ -1,0 +1,107 @@
+import sys
+import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+
+import json
+import datetime
+import streamlit as st
+from lib.auth import require_login
+from lib.logger import get_log, get_log_df
+from lib.snapshot import render_data_status
+
+require_login()
+
+st.set_page_config(page_title="Session Log — Curation Toolkit", page_icon="📋", layout="wide")
+
+env = st.session_state["env"]
+st.title("Session Log")
+st.caption(f"Environment: **{env['label']}** — {env['api_url']}")
+
+render_data_status()
+
+df = get_log_df()
+
+if df.empty:
+    st.info(
+        "No actions recorded yet. "
+        "API write calls (merges, deletes, updates) and major operations will appear here."
+    )
+    st.stop()
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+n_api   = int((df["type"] == "api").sum())
+n_fail  = int((df["ok"] == False).sum())
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Total entries", len(df))
+c2.metric("API calls", n_api)
+c3.metric("Failures", n_fail)
+
+# ── Filters ───────────────────────────────────────────────────────────────────
+fc1, fc2, fc3 = st.columns([1, 1, 3])
+with fc1:
+    type_filter = st.multiselect("Type", ["action", "api"], default=["action", "api"])
+with fc2:
+    ok_filter = st.multiselect("Result", ["ok", "failed"], default=["ok", "failed"])
+with fc3:
+    search = st.text_input("Search description / URL / response", "")
+
+view = df[df["type"].isin(type_filter)].copy()
+
+ok_bool = {True: "ok", False: "failed"}
+ok_vals = {v: k for k, v in ok_bool.items()}
+view = view[view["ok"].map(ok_bool).isin(ok_filter)]
+
+if search.strip():
+    q = search.strip()
+    mask = (
+        view["description"].str.contains(q, case=False, na=False)
+        | view["url"].str.contains(q, case=False, na=False)
+        | view["response"].str.contains(q, case=False, na=False)
+        | view["request"].str.contains(q, case=False, na=False)
+    )
+    view = view[mask]
+
+st.dataframe(
+    view,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "time":        st.column_config.TextColumn("Time", width="small"),
+        "type":        st.column_config.TextColumn("Type", width="small"),
+        "ok":          st.column_config.CheckboxColumn("OK", width="small"),
+        "method":      st.column_config.TextColumn("Method", width="small"),
+        "status":      st.column_config.TextColumn("Status", width="small"),
+        "url":         st.column_config.TextColumn("URL"),
+        "description": st.column_config.TextColumn("Description"),
+        "request":     st.column_config.TextColumn("Request"),
+        "response":    st.column_config.TextColumn("Response"),
+    },
+)
+
+# ── Export ────────────────────────────────────────────────────────────────────
+now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+ec1, ec2, ec3 = st.columns(3)
+
+with ec1:
+    st.download_button(
+        "Export filtered as CSV",
+        data=view.to_csv(index=False).encode("utf-8"),
+        file_name=f"session_log_{now_str}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+with ec2:
+    st.download_button(
+        "Export full log as JSON",
+        data=json.dumps(get_log(), indent=2).encode("utf-8"),
+        file_name=f"session_log_{now_str}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+with ec3:
+    if st.button("Clear log", type="secondary", use_container_width=True):
+        st.session_state["session_log"] = []
+        st.rerun()

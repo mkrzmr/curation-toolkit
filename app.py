@@ -1,12 +1,13 @@
 import streamlit as st
 from lib.auth import try_login
 from lib.environments import ENVIRONMENTS, DEFAULT_ENV
+from lib.logger import log_action
 
 st.set_page_config(page_title="SSH MP Curation Toolkit", page_icon="🔍", layout="centered")
 
 # Already logged in — go straight to the first tool
 if st.session_state.get("authenticated"):
-    st.switch_page("pages/1_Contributors.py")
+    st.switch_page("pages/1_Data.py")
 
 st.title("SSH Open Marketplace — Curation Toolkit")
 st.caption("Sign in with your Marketplace account to continue.")
@@ -34,6 +35,7 @@ if submitted:
             st.session_state["bearer"] = token
             st.session_state["username"] = username
             st.session_state["env"] = ENVIRONMENTS[env_name]
-            st.switch_page("pages/1_Contributors.py")
+            log_action(f"Login: {username} on {env_name} ({ENVIRONMENTS[env_name]['api_url']})")
+            st.switch_page("pages/1_Data.py")
         else:
             st.error("Login failed. Please check your credentials.")
