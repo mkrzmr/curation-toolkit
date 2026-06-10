@@ -370,7 +370,7 @@ def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool,
     for cat_idx, (path, items_key) in enumerate(_CATEGORY_FETCH):
         url = f"{api_url}/api/{path}"
         try:
-            resp = requests.get(f"{url}?perpage=50&page=1", headers=headers, timeout=20)
+            resp = requests.get(f"{url}?perpage=50&page=1", headers=headers, timeout=60)
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
@@ -386,7 +386,7 @@ def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool,
 
         for page in range(2, total_pages + 1):
             try:
-                r = requests.get(f"{url}?perpage=50&page={page}", headers=headers, timeout=20)
+                r = requests.get(f"{url}?perpage=50&page={page}", headers=headers, timeout=60)
                 r.raise_for_status()
                 all_items.extend(r.json().get(items_key, []))
             except Exception as e:
