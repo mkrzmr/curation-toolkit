@@ -82,5 +82,5 @@ with col_right:
                     hide_index=True,
                 )
 
-                csv = result[disp_cols].to_csv(index=False).encode("utf-8")
+                csv = display[disp_cols].to_csv(index=False).encode("utf-8")
                 st.download_button("Download CSV", csv, "item_duplicates.csv", "text/csv")

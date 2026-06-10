@@ -353,9 +353,35 @@ _CATEGORY_FETCH = [
 ]
 
 
+_SNAPSHOT_PERPAGE = 20   # smaller pages → shorter per-request response time
+_SNAPSHOT_TIMEOUT = 60   # seconds per request
+_SNAPSHOT_RETRIES = 3    # retries on timeout / 5xx before giving up
+
+
+def _fetch_page(url: str, headers: dict, page: int, retries: int = _SNAPSHOT_RETRIES) -> dict:
+    """GET a single paginated page with retry on timeout or 5xx."""
+    paged = f"{url}?perpage={_SNAPSHOT_PERPAGE}&page={page}"
+    for attempt in range(retries):
+        try:
+            resp = requests.get(paged, headers=headers, timeout=_SNAPSHOT_TIMEOUT)
+            if resp.status_code < 500:
+                resp.raise_for_status()
+                return resp.json()
+            # 5xx — wait and retry
+        except requests.exceptions.Timeout:
+            pass  # retry below
+        if attempt < retries - 1:
+            time.sleep(2 ** attempt)  # 1 s, 2 s back-off
+    raise RuntimeError(
+        f"Failed to fetch {paged} after {retries} attempts "
+        f"(timeout={_SNAPSHOT_TIMEOUT}s)"
+    )
+
+
 def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool, str]:
     """
     Fetch all items from all 5 categories and save as full_items_{ts}.json.
+    Uses small page sizes and retries to handle slow category endpoints.
     Returns (success, message).
     """
     import json
@@ -369,10 +395,10 @@ def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool,
 
     for cat_idx, (path, items_key) in enumerate(_CATEGORY_FETCH):
         url = f"{api_url}/api/{path}"
+
+        # First page — also gives us the total page count
         try:
-            resp = requests.get(f"{url}?perpage=50&page=1", headers=headers, timeout=60)
-            resp.raise_for_status()
-            data = resp.json()
+            data = _fetch_page(url, headers, page=1)
         except Exception as e:
             bar.empty()
             return False, f"Failed to fetch {path}: {e}"
@@ -386,9 +412,8 @@ def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool,
 
         for page in range(2, total_pages + 1):
             try:
-                r = requests.get(f"{url}?perpage=50&page={page}", headers=headers, timeout=60)
-                r.raise_for_status()
-                all_items.extend(r.json().get(items_key, []))
+                r = _fetch_page(url, headers, page=page)
+                all_items.extend(r.get(items_key, []))
             except Exception as e:
                 bar.empty()
                 return False, f"Failed fetching {path} page {page}: {e}"
