@@ -1,3 +1,16 @@
+"""
+Session Log — view and export the record of actions taken this session.
+
+Every login, API write call (merge, delete, PUT), and major operation
+(snapshot creation, orphan verification) is appended to the in-memory
+log by lib.logger.  This page provides filtering, full-text search,
+and export as CSV or JSON.
+
+The log lives in st.session_state and is lost when the server restarts
+or the browser tab is closed.  Export before ending a curation session
+if an audit trail is needed.
+"""
+
 import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -62,8 +75,9 @@ if search.strip():
     )
     view = view[mask]
 
+DISPLAY_COLS = ["time", "type", "ok", "method", "status", "response", "description", "url", "request"]
 st.dataframe(
-    view,
+    view[DISPLAY_COLS],
     use_container_width=True,
     hide_index=True,
     column_config={
@@ -72,10 +86,10 @@ st.dataframe(
         "ok":          st.column_config.CheckboxColumn("OK", width="small"),
         "method":      st.column_config.TextColumn("Method", width="small"),
         "status":      st.column_config.TextColumn("Status", width="small"),
+        "response":    st.column_config.TextColumn("Response", width="large"),
+        "description": st.column_config.TextColumn("Description", width="large"),
         "url":         st.column_config.TextColumn("URL"),
-        "description": st.column_config.TextColumn("Description"),
         "request":     st.column_config.TextColumn("Request"),
-        "response":    st.column_config.TextColumn("Response"),
     },
 )
 

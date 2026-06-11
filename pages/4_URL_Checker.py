@@ -1,3 +1,23 @@
+"""
+URL Checker — batch-verify HTTP(S) links extracted from snapshot items.
+
+Two modes are supported:
+  accessibleAt only  – checks only the primary access URL(s) for each item.
+  All URLs           – scans every field in every item for http(s) links
+                       (thumbnails, external IDs, media, etc.).
+
+URLs are checked concurrently using a ThreadPoolExecutor.  Each URL receives
+a HEAD request; servers that reject HEAD (405/501) are retried with a
+streaming GET to avoid downloading the full body.
+
+Results are sorted so items with the most broken links appear first.
+
+Shared state (st.session_state keys)
+  url_check_input    – DataFrame of (persistentId, category, label, field, url)
+  url_check_mode     – human-readable scope label for display
+  url_check_results  – url_check_input extended with status, ok, error columns
+"""
+
 import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -34,6 +54,14 @@ def load_snapshot() -> pd.DataFrame:
 
 
 def _check_one(url: str, timeout: int) -> dict:
+    """
+    Check a single URL and return a result dict with keys: url, status, ok, error.
+
+    Sends a HEAD request first.  If the server returns 405 or 501 (method not
+    allowed / not implemented) it falls back to a streaming GET so the body is
+    never downloaded.  Network errors are captured and returned as error strings
+    rather than raised as exceptions, so concurrent execution is never interrupted.
+    """
     try:
         r = requests.head(
             url, timeout=timeout, allow_redirects=True,
@@ -75,6 +103,19 @@ def _extract_urls_from_value(val) -> list[str]:
 
 
 def extract_urls(snap: pd.DataFrame, selected_cats: list, mode: str) -> pd.DataFrame:
+    """
+    Extract all URLs from the snapshot and return one row per (item, url) pair.
+
+    Parameters
+    ----------
+    snap          Full snapshot DataFrame.
+    selected_cats List of category strings to include.
+    mode          "accessibleAt" → only the accessibleAt field;
+                  anything else  → every field in every row.
+
+    Returns a DataFrame with columns: persistentId, category, label, field, url.
+    Duplicate URLs within the same item are deduplicated in "all" mode.
+    """
     subset = snap[snap["category"].isin(selected_cats)]
     rows = []
 

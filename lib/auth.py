@@ -1,3 +1,10 @@
+"""
+Authentication helpers for the SSH Open Marketplace API.
+
+Credentials are validated against the live API; the returned bearer token
+is stored in st.session_state and forwarded with every subsequent API call.
+"""
+
 import requests
 import streamlit as st
 from lib.environments import ENVIRONMENTS, DEFAULT_ENV

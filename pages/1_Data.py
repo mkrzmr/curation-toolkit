@@ -1,3 +1,19 @@
+"""
+Data Source — manage the local snapshot used by all curation tools.
+
+Shows all full_items_*.json files in the data/ directory with their age,
+size, and source environment (read from the sidecar .meta.json file written
+when the snapshot was created).  The most recently modified file is the
+active snapshot.
+
+Two ways to refresh the data:
+  Download from GitHub  – fast, always Production data, sourced from the
+                          sshompitor repository's data/ directory.
+  Fetch fresh from API  – slow (several minutes), creates a snapshot from
+                          the currently logged-in environment (recommended
+                          when working on Stage).
+"""
+
 import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -7,6 +23,7 @@ from lib.auth import require_login
 from lib.snapshot import (
     get_latest_snapshot_info,
     fetch_latest_from_github,
+    read_snapshot_meta,
     _DATA_DIR,
 )
 from lib.api import create_snapshot_from_api
@@ -57,8 +74,13 @@ else:
             age_str = f"{int(age_days)} days ago"
 
         size_mb = p.stat().st_size / 1_048_576
+        meta = read_snapshot_meta(p)
+        env_label = meta.get("env_label", "")
+        source = meta.get("source", "")
         rows.append({
             "active": i == 0,
+            "environment": env_label if env_label else "—",
+            "source": source.capitalize() if source else "—",
             "file": p.name,
             "date": mtime.strftime("%Y-%m-%d %H:%M"),
             "age": age_str,
@@ -74,6 +96,8 @@ else:
         column_config={
             "active": st.column_config.CheckboxColumn("Active", width="small",
                 help="The most recent file is used by all tools."),
+            "environment": st.column_config.TextColumn("Environment"),
+            "source": st.column_config.TextColumn("Source"),
         },
     )
 
@@ -139,7 +163,10 @@ with col2:
         type="primary" if is_stage else "secondary",
     ):
         with st.spinner("Fetching all items from the Marketplace API…"):
-            ok, msg = create_snapshot_from_api(env["api_url"], st.session_state["bearer"], _DATA_DIR)
+            ok, msg = create_snapshot_from_api(
+                env["api_url"], st.session_state["bearer"], _DATA_DIR,
+                env_label=env.get("label", ""),
+            )
         if ok:
             st.success(msg)
             st.cache_data.clear()

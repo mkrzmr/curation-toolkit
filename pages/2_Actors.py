@@ -1,3 +1,31 @@
+"""
+Actors — Browse, Duplicates, and Orphaned tabs.
+
+Browse
+  Shows every actor × item appearance from the snapshot (one row per
+  actor-role-item combination).  Filterable by category, role, and name.
+  If actor data has been loaded from the live API, email filtering is also available.
+
+Duplicates
+  Scans the snapshot for actors with identical name (and optionally website).
+  Groups are classified as high-confidence when actors in the group also share
+  the same email address.  Supports one-click merge with attribute consolidation
+  (email, website, externalIds are unioned across all actors being merged).
+
+Orphaned
+  Identifies actors that exist in the API but are credited on no item.
+  Uses a two-phase approach: snapshot cross-reference to find candidates,
+  then live API verification to confirm before offering deletion.
+
+Shared state (st.session_state keys)
+  actor_details       – DataFrame of all actors loaded from the live API
+  actor_dup_summary   – last duplicate-search summary result
+  actor_dup_full      – last duplicate-search full result
+  merged_groups       – dict of already-merged group keys → success message
+  expander_open       – dict tracking which expanders should stay open after merge
+  orphan_verified     – dict of actor_id → has_items (True/False/None) from live check
+"""
+
 import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -13,10 +41,10 @@ from lib.snapshot import render_data_status, require_snapshot
 
 require_login()
 
-st.set_page_config(page_title="Actor Duplicates — Curation Toolkit", page_icon="👤", layout="wide")
+st.set_page_config(page_title="Actors — Curation Toolkit", page_icon="👤", layout="wide")
 
 env = st.session_state["env"]
-st.title("Actor Duplicates")
+st.title("Actors")
 st.caption(f"Environment: **{env['label']}** — {env['api_url']}")
 
 MP_SERVER = env["mp_url"]
@@ -26,13 +54,29 @@ render_data_status()
 
 
 @st.cache_data(show_spinner="Loading actors from snapshot…")
-def load_actors() -> pd.DataFrame:
+def load_appearances() -> pd.DataFrame:
+    """One row per actor × item appearance."""
+    util = get_util()
+    df = util.getContributors()
+    if df.empty:
+        return df
+    df["MPUrl"] = MP_SERVER + df["category"] + "/" + df["persistentId"]
+    return df
+
+
+@st.cache_data(show_spinner="Loading actors from snapshot…")
+def load_unique_actors() -> pd.DataFrame:
+    """One row per unique actor (deduplicated by id)."""
     util = get_util()
     c = util.getContributors()
     if c.empty:
         return pd.DataFrame()
+    cols_wanted = ["actor.id", "actor.name"]
+    for col in ["actor.website", "actor.externalIds", "actor.affiliations"]:
+        if col in c.columns:
+            cols_wanted.append(col)
     actors = (
-        c[["actor.id", "actor.name", "actor.website", "actor.externalIds", "actor.affiliations"]]
+        c[cols_wanted]
         .drop_duplicates(subset=["actor.id"])
         .rename(columns={
             "actor.id":           "id",
@@ -47,89 +91,164 @@ def load_actors() -> pd.DataFrame:
 
 def _group_confidence(actor_ids: list[int], actor_details: pd.DataFrame | None) -> str:
     """
-    Return 'high' if at least two actors in the group share the same non-empty email,
-    'low' otherwise.
+    Classify a duplicate group as 'high' or 'low' confidence.
+
+    'High' means at least two actors in the group share the same non-empty
+    email address — strong evidence they are the same person.
+    'Low' means only the name matched; manual review is recommended.
+
+    Returns 'low' whenever actor_details is not loaded (email not available).
     """
     if actor_details is None or actor_details.empty:
         return "low"
     emails = (
         actor_details.loc[actor_details["id"].isin(actor_ids), "email"]
-        .dropna()
-        .astype(str)
-        .str.strip()
+        .dropna().astype(str).str.strip()
         .loc[lambda s: s != ""]
     )
     counts = Counter(emails.tolist())
     return "high" if any(v >= 2 for v in counts.values()) else "low"
 
 
-tab_dupes, tab_orphans = st.tabs(["Find Duplicates", "Orphaned Actors"])
+# ── Shared: actor data loaded from the live API ───────────────────────────────
+actor_details: pd.DataFrame | None = st.session_state.get("actor_details")
+
+with st.container(border=True):
+    col_info, col_btn = st.columns([3, 1])
+    with col_info:
+        if actor_details is not None:
+            n_email = int(actor_details["email"].notna().sum())
+            st.success(
+                f"{len(actor_details)} actors loaded from API  ·  "
+                f"{n_email} have an email address"
+            )
+        else:
+            st.info(
+                "Load actor data from the API to enable email filtering, "
+                "duplicate confidence scoring, and orphan detection."
+            )
+    with col_btn:
+        btn_label = "Refresh actors" if actor_details is not None else "Load actors from API"
+        if st.button(
+            btn_label,
+            use_container_width=True,
+            type="secondary" if actor_details is not None else "primary",
+            key="load_actors_top",
+        ):
+            with st.spinner("Fetching actors from API…"):
+                try:
+                    st.session_state["actor_details"] = fetch_all_actors(
+                        env["api_url"], st.session_state["bearer"]
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to fetch actors: {e}")
+
+st.divider()
+
+tab_browse, tab_dupes, tab_orphans = st.tabs(["Browse", "Duplicates", "Orphaned"])
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — Actor Duplicates
+# TAB 1 — Browse
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_browse:
+    appearances = load_appearances()
+
+    if appearances.empty:
+        st.warning("No actor data found in snapshot.")
+    else:
+        disp = appearances.copy()
+        if actor_details is not None and not actor_details.empty:
+            disp = disp.merge(
+                actor_details[["id", "email"]].rename(columns={"id": "actor.id"}),
+                on="actor.id",
+                how="left",
+            )
+
+        col_filter, col_main = st.columns([1, 3])
+
+        with col_filter:
+            categories = sorted(disp["category"].dropna().unique().tolist())
+            selected_cats = st.multiselect("Category", categories, default=categories, key="br_cat")
+
+            roles = sorted(disp["role.label"].dropna().unique().tolist())
+            selected_roles = st.multiselect("Role", roles, default=roles, key="br_role")
+
+            name_query = st.text_input("Actor name contains", "", key="br_name")
+
+            email_query = ""
+            if actor_details is not None:
+                email_query = st.text_input("Email contains", "", key="br_email")
+            else:
+                st.caption("Load actor data above to enable email filter.")
+
+        with col_main:
+            mask = (
+                disp["category"].isin(selected_cats)
+                & disp["role.label"].isin(selected_roles)
+            )
+            if name_query.strip():
+                mask &= disp["actor.name"].str.contains(name_query.strip(), case=False, na=False)
+            if email_query.strip() and "email" in disp.columns:
+                mask &= disp["email"].fillna("").str.contains(email_query.strip(), case=False)
+
+            filtered = disp[mask].reset_index(drop=True)
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Rows shown", len(filtered))
+            m2.metric("Unique actors", filtered["actor.name"].nunique())
+            m3.metric("Unique items", filtered["persistentId"].nunique())
+
+            DISPLAY_COLS = [
+                "actor.name", "email", "role.label",
+                "label", "category", "persistentId", "actor.website", "MPUrl",
+            ]
+            show_cols = [c for c in DISPLAY_COLS if c in filtered.columns]
+            st.dataframe(
+                filtered[show_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "actor.name":    st.column_config.TextColumn("Actor"),
+                    "role.label":    st.column_config.TextColumn("Role"),
+                    "email":         st.column_config.TextColumn("Email"),
+                    "actor.website": st.column_config.LinkColumn("Website"),
+                    "MPUrl":         st.column_config.LinkColumn("Item link", display_text="Open"),
+                },
+            )
+            csv = filtered[show_cols].to_csv(index=False).encode("utf-8")
+            st.download_button("Download CSV", csv, "actors.csv", "text/csv", key="dl_browse")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 2 — Duplicates
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_dupes:
-    actor_details: pd.DataFrame | None = st.session_state.get("actor_details")
-
-    # ── Email loading ─────────────────────────────────────────────────────────
-    with st.container(border=True):
-        st.markdown("**Actor emails (optional)**")
-        st.caption(
-            "Loading emails enables confidence scoring: groups where actors share "
-            "both a name **and** the same email address are flagged as high-confidence "
-            "merge candidates."
-        )
-        if actor_details is not None:
-            n_with_email = int(actor_details["email"].notna().sum())
-            st.success(
-                f"{len(actor_details)} actors loaded — "
-                f"{n_with_email} have an email address."
-            )
-            if st.button("Refresh actor emails", use_container_width=False):
-                with st.spinner("Fetching actors from API…"):
-                    try:
-                        st.session_state["actor_details"] = fetch_all_actors(
-                            env["api_url"], st.session_state["bearer"]
-                        )
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed: {e}")
-        else:
-            if st.button("Load actor emails from API", use_container_width=False, type="primary"):
-                with st.spinner("Fetching actors from API…"):
-                    try:
-                        st.session_state["actor_details"] = fetch_all_actors(
-                            env["api_url"], st.session_state["bearer"]
-                        )
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed: {e}")
-
-    st.divider()
-
-    # ── Duplicate search controls ─────────────────────────────────────────────
-    actors = load_actors()
+    actors = load_unique_actors()
+    actor_details = st.session_state.get("actor_details")
 
     if actors.empty:
-        st.warning("No actor/contributor data found in snapshot.")
+        st.warning("No actor data found in snapshot.")
     else:
         col_left, _ = st.columns([1, 2])
         with col_left:
-            selected_actor_props = st.multiselect(
+            selected_props = st.multiselect(
                 "Match on",
                 ["name", "website"],
                 default=["name"],
+                key="dup_props",
             )
-            run_actors = st.button("Find Duplicates", use_container_width=True)
+            run_dupes = st.button("Find Duplicates", use_container_width=True, key="btn_find_dupes")
 
-        if run_actors:
-            if not selected_actor_props:
+        if run_dupes:
+            if not selected_props:
                 st.warning("Select at least one property to match on.")
             else:
-                props_csv = ",".join(selected_actor_props)
-                util = get_util()
                 try:
-                    result_full, result_summary = util.getDuplicatedActorsWithItems(actors, props_csv)
+                    result_full, result_summary = get_util().getDuplicatedActorsWithItems(
+                        actors, ",".join(selected_props)
+                    )
                     st.session_state["actor_dup_summary"] = result_summary
                     st.session_state["actor_dup_full"] = result_full
                 except Exception as e:
@@ -137,7 +256,6 @@ with tab_dupes:
 
         result_summary = st.session_state.get("actor_dup_summary")
         result_full    = st.session_state.get("actor_dup_full")
-        actor_details  = st.session_state.get("actor_details")
 
         if result_summary is None:
             st.info("Click **Find Duplicates** to scan the snapshot.")
@@ -146,7 +264,6 @@ with tab_dupes:
         else:
             n_groups = result_summary["name"].nunique()
 
-            # Classify groups by confidence
             groups = []
             for name, group in result_summary.groupby("name"):
                 actor_ids = group["id"].tolist()
@@ -156,7 +273,6 @@ with tab_dupes:
             high_conf = [(n, g, c) for n, g, c in groups if c == "high"]
             low_conf  = [(n, g, c) for n, g, c in groups if c == "low"]
 
-            # Summary metrics
             m1, m2, m3 = st.columns(3)
             m1.metric("Duplicate groups", n_groups)
             m2.metric("High confidence", len(high_conf),
@@ -164,14 +280,13 @@ with tab_dupes:
             m3.metric("Low confidence", len(low_conf),
                       help="Name match only — review before merging.")
 
-            merged_groups  = st.session_state.setdefault("merged_groups", {})
-            expander_open  = st.session_state.setdefault("expander_open", {})
+            merged_groups = st.session_state.setdefault("merged_groups", {})
+            expander_open = st.session_state.setdefault("expander_open", {})
 
             def _render_group(i, name, group, conf, section_prefix):
                 actor_ids = group["id"].tolist()
                 key = f"{section_prefix}{i}_{re.sub(r'[^a-zA-Z0-9]', '_', name)[:30]}"
-
-                badge = "★ High confidence" if conf == "high" else "Low confidence"
+                badge  = "★ High confidence" if conf == "high" else "Low confidence"
                 header = f"{name} — {len(group)} actors  ·  {badge}"
 
                 with st.expander(header, expanded=expander_open.get(key, conf == "high")):
@@ -183,9 +298,8 @@ with tab_dupes:
                             contrib = result_full[result_full["id"] == actor_id]
                             if not contrib.empty:
                                 first = contrib.iloc[0]
-                                item_url  = MP_SERVER + first.get("category", "") + "/" + first.get("persistentId", "")
+                                item_url   = MP_SERVER + first.get("category", "") + "/" + first.get("persistentId", "")
                                 item_label = first.get("label", "")
-
                         row = {
                             "id":           actor_id,
                             "items":        len(actor_row["itemPersistentId"]),
@@ -206,8 +320,8 @@ with tab_dupes:
 
                     if conf == "high":
                         st.info(
-                            "These actors share the same name **and** email address. "
-                            "They are almost certainly the same person."
+                            "These actors share the same name **and** email address — "
+                            "they are almost certainly the same person."
                         )
 
                     st.divider()
@@ -238,89 +352,65 @@ with tab_dupes:
                         if ok:
                             merged_groups[key] = msg
                             expander_open[key] = True
-                            load_actors.clear()
+                            load_unique_actors.clear()
                             st.rerun()
                         else:
                             st.error(msg)
 
-            # ── High confidence section ───────────────────────────────────────
             if high_conf:
                 st.markdown("### Suggested merges")
                 st.caption(
-                    "These groups match on both **name and email address**. "
-                    "Merging them is strongly recommended."
+                    "These groups match on both **name and email address** — "
+                    "merging them is strongly recommended."
                 )
                 for i, (name, group, conf) in enumerate(high_conf):
                     _render_group(i, name, group, conf, "hc_")
 
-            # ── Lower confidence section ──────────────────────────────────────
             if low_conf:
                 if high_conf:
                     st.markdown("### Other name matches")
-                    st.caption("Name match only — review the items before merging.")
+                    st.caption("Name match only — review before merging.")
                 for i, (name, group, conf) in enumerate(low_conf):
                     _render_group(i, name, group, conf, "lc_")
 
             st.divider()
             with st.expander("Full detail table"):
                 if result_full is not None:
-                    full_disp = [
+                    full_cols = [
                         c for c in ["id", "name", "website", "role.label", "label", "category", "persistentId"]
                         if c in result_full.columns
                     ]
-                    st.dataframe(result_full[full_disp], use_container_width=True, hide_index=True)
+                    st.dataframe(result_full[full_cols], use_container_width=True, hide_index=True)
 
             csv = result_summary.to_csv(index=False).encode("utf-8")
-            st.download_button("Download CSV", csv, "actor_duplicates.csv", "text/csv")
+            st.download_button("Download CSV", csv, "actor_duplicates.csv", "text/csv", key="dl_dupes")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2 — Orphaned Actors
+# TAB 3 — Orphaned Actors
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_orphans:
-    st.subheader("Actors with no associated items")
+    orphan_actor_details: pd.DataFrame | None = st.session_state.get("actor_details")
+
     st.markdown(
         "Actors in the Marketplace may exist without being credited on any item — "
         "for example, leftover entries from past imports or merges. "
-        "This tool finds and removes them in three steps."
+        "This tool finds and removes them."
     )
-
-    # ── Step 1: load full actor list from API ────────────────────────────────
-    st.markdown("#### Step 1 — Load actors from the API")
-    st.caption(
-        "Fetches the complete actor list (~9 000 entries) across all pages. "
-        "Shared with the Find Duplicates tab — loading here also enables email-based confidence scoring."
-    )
-
-    orphan_actor_details: pd.DataFrame | None = st.session_state.get("actor_details")
-
-    col_load, _ = st.columns([1, 2])
-    with col_load:
-        btn_label = "Refresh actors from API" if orphan_actor_details is not None else "Load actors from API"
-        if st.button(btn_label, key="load_orphan_actors", use_container_width=True):
-            with st.spinner("Fetching actors from API…"):
-                try:
-                    st.session_state["actor_details"] = fetch_all_actors(
-                        env["api_url"], st.session_state["bearer"]
-                    )
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to fetch actors: {e}")
 
     if orphan_actor_details is None:
-        st.info("Load actor data from the API above to continue.")
+        st.info("Load actor data from the API (button at the top of the page) to continue.")
         st.stop()
 
-    # ── Step 2: snapshot cross-reference → candidates ────────────────────────
-    st.divider()
-    st.markdown("#### Step 2 — Cross-reference with snapshot")
+    # ── Step 1: snapshot cross-reference → candidates ────────────────────────
+    st.markdown("#### Step 1 — Cross-reference with snapshot")
     st.caption(
         "The local snapshot lists every actor credited on at least one item. "
         "Actors absent from the snapshot are *candidates* — they may be orphaned, "
         "or the snapshot may simply be stale. The next step confirms which is which."
     )
 
-    snapshot_actor_ids = set(load_actors()["id"].dropna().astype(int))
+    snapshot_actor_ids = set(load_unique_actors()["id"].dropna().astype(int))
     candidates = (
         orphan_actor_details[~orphan_actor_details["id"].isin(snapshot_actor_ids)]
         .copy()
@@ -336,13 +426,12 @@ with tab_orphans:
         st.success("Every actor in the API appears in the snapshot — no candidates to investigate.")
         st.stop()
 
-    # ── Step 3: live API verification ────────────────────────────────────────
+    # ── Step 2: live API verification ────────────────────────────────────────
     st.divider()
-    st.markdown("#### Step 3 — Verify candidates via the live API")
+    st.markdown("#### Step 2 — Verify candidates via the live API")
     st.caption(
         f"Calls `GET /api/actors/{{id}}?items=true` for each of the {len(candidates)} candidates "
-        "to check whether the API itself considers them item-free. "
-        "Requests run in batches to avoid overloading the API."
+        "to confirm whether the API itself considers them item-free."
     )
 
     verified: dict | None = st.session_state.get("orphan_verified")
@@ -384,22 +473,19 @@ with tab_orphans:
     if not uncertain.empty:
         with st.expander(f"{len(uncertain)} actor(s) could not be verified — API errors or timeouts"):
             st.caption("Excluded from the delete list. Re-run verification to retry.")
-            st.dataframe(
-                uncertain[["id", "name", "email", "website"]].fillna(""),
-                use_container_width=True, hide_index=True,
-            )
+            st.dataframe(uncertain[["id", "name", "email", "website"]].fillna(""),
+                         use_container_width=True, hide_index=True)
 
     if confirmed_orphans.empty:
         st.success("All candidates have items on the live API — nothing to delete.")
         st.stop()
 
-    # ── Step 4: review and delete ─────────────────────────────────────────────
+    # ── Step 3: review and delete ─────────────────────────────────────────────
     st.divider()
-    st.markdown("#### Step 4 — Review and delete")
+    st.markdown("#### Step 3 — Review and delete")
     st.markdown(
         "Check the actors you want to remove. "
-        "Deletion uses `force=false`: actors affiliated with other actors "
-        "(e.g. a researcher listed under a university) will be **refused by the API** "
+        "Actors affiliated with other actors will be **refused by the API** "
         "and reported below — they are never silently skipped."
     )
 
@@ -419,49 +505,43 @@ with tab_orphans:
         key="orphan_editor",
     )
 
-    to_delete = edited[edited["delete"]]["id"].tolist()
+    to_delete_orphans = edited[edited["delete"]]["id"].tolist()
 
-    st.divider()
-
-    if not to_delete:
+    if not to_delete_orphans:
         st.info("No actors selected — tick 'Delete?' in the table above.")
     else:
         st.error(
-            f"**{len(to_delete)} actor(s) selected for deletion.**  \n"
-            "This cannot be undone. Actors affiliated with others will be refused by the API and left intact."
+            f"**{len(to_delete_orphans)} actor(s) selected for deletion.**  \n"
+            "This cannot be undone. Actors affiliated with others will be refused by the API."
         )
         confirmed_cb = st.checkbox(
-            f"I understand that up to {len(to_delete)} actor(s) will be permanently deleted",
+            f"I understand that up to {len(to_delete_orphans)} actor(s) will be permanently deleted",
             key="orphan_confirm",
         )
         if st.button(
-            f"Delete {len(to_delete)} actor(s)",
+            f"Delete {len(to_delete_orphans)} actor(s)",
             type="primary",
             disabled=not confirmed_cb,
             key="btn_delete_orphans",
         ):
             successes, failures = [], []
-            bar = st.progress(0, text=f"Deleting… 0 / {len(to_delete)}")
-            for i, actor_id in enumerate(to_delete, 1):
+            bar = st.progress(0, text=f"Deleting… 0 / {len(to_delete_orphans)}")
+            for i, actor_id in enumerate(to_delete_orphans, 1):
                 ok, msg = delete_actor(int(actor_id))
                 (successes if ok else failures).append((actor_id, msg))
-                bar.progress(i / len(to_delete), text=f"Deleting… {i} / {len(to_delete)}")
+                bar.progress(i / len(to_delete_orphans), text=f"Deleting… {i} / {len(to_delete_orphans)}")
             bar.empty()
 
             if successes:
                 st.success(f"Deleted {len(successes)} actor(s).")
             if failures:
-                st.warning(
-                    f"{len(failures)} actor(s) not deleted "
-                    "(affiliated with others, or an API error):"
-                )
+                st.warning(f"{len(failures)} actor(s) not deleted:")
                 for aid, msg in failures:
                     st.write(f"- ID {aid}: {msg}")
 
             deleted_ids = {aid for aid, _ in successes}
-            remaining_ids = set(orphan_actor_details["id"]) - deleted_ids
             st.session_state["actor_details"] = orphan_actor_details[
-                orphan_actor_details["id"].isin(remaining_ids)
+                ~orphan_actor_details["id"].isin(deleted_ids)
             ].reset_index(drop=True)
             for aid in deleted_ids:
                 st.session_state["orphan_verified"].pop(int(aid), None)

@@ -1,3 +1,39 @@
+"""
+Thin wrappers around the SSH Open Marketplace REST API.
+
+All write operations (PUT, POST, DELETE) are logged via lib.logger so
+they appear in the Session Log page.  Read operations used only during
+snapshot creation are not individually logged (the snapshot function
+logs a single summary entry on completion).
+
+Actor helpers
+-------------
+fetch_all_actors()           – paginated GET /api/actors → DataFrame
+_check_one_actor()           – GET /api/actors/{id}?items=true with retry
+verify_orphans()             – concurrent batch verification of actor candidates
+delete_actor()               – DELETE /api/actors/{id}
+_get_actor()                 – GET /api/actors/{id} (full record, used before merge)
+_consolidate_actor_payload() – build PUT-ready ActorCore merging attrs from multiple actors
+merge_actors()               – 3-step merge: GET all → PUT consolidated → POST merge
+
+Item helpers
+------------
+get_item()                   – GET /api/{category-path}/{persistentId}
+put_item()                   – PUT (update) an item, logs the call
+fix_item_keyword()           – replace a keyword property on an item and PUT it back
+
+Concept / vocabulary helpers
+----------------------------
+fetch_all_keyword_concepts() – paginated GET /api/concept-search?types=keyword
+fetch_all_concepts()         – paginated GET /api/concept-search (all types and vocabs)
+delete_concept()             – DELETE /api/vocabularies/{vocab}/concepts/{code}?force=true
+
+Snapshot creation
+-----------------
+create_snapshot_from_api()   – fetch all 5 item categories and save as full_items_{ts}.json
+_fetch_page()                – single-page GET with retry, used by create_snapshot_from_api
+"""
+
 import time
 import requests
 import pandas as pd
@@ -233,6 +269,8 @@ def fetch_all_concepts(api_url: str, bearer: str) -> pd.DataFrame:
                "candidate", "definition", "vocabulary_code", "type_code"]].copy()
 
 
+# Maps the singular category name used inside item records to the plural
+# path segment used by the REST API (e.g. "tool-or-service" → "tools-services").
 _CATEGORY_PATH = {
     "tool-or-service":   "tools-services",
     "training-material": "training-materials",
@@ -244,11 +282,17 @@ _CATEGORY_PATH = {
 
 
 def _item_url(api_url: str, category: str, persistent_id: str) -> str:
+    """Build the canonical REST URL for a single item."""
     path = _CATEGORY_PATH.get(category, category + "s")
     return f"{api_url}/api/{path}/{persistent_id}"
 
 
 def get_item(category: str, persistent_id: str, api_url: str, bearer: str) -> dict:
+    """
+    Fetch a single item from the live API and return the full JSON record.
+
+    Raises requests.HTTPError on non-2xx responses.
+    """
     resp = requests.get(
         _item_url(api_url, category, persistent_id),
         headers={"Authorization": bearer},
@@ -260,6 +304,12 @@ def get_item(category: str, persistent_id: str, api_url: str, bearer: str) -> di
 
 def put_item(category: str, persistent_id: str, item_data: dict,
              api_url: str, bearer: str) -> tuple[bool, str]:
+    """
+    PUT a full item record back to the API (update in place).
+
+    item_data should be the dict returned by get_item(), modified as needed.
+    Returns (success, message) and logs the call to the session log.
+    """
     import json as _json
     url = _item_url(api_url, category, persistent_id)
     resp = requests.put(
@@ -321,10 +371,15 @@ def delete_concept(concept_code: str, vocab_code: str = "sshoc-keyword") -> tupl
 
     force=true is required when the concept is referenced by existing item properties;
     the API will also remove those property references from the affected items.
+
+    Concept codes from the API are form-URL-encoded (spaces as '+', special chars as '%XX').
+    We decode with unquote_plus then re-encode with quote so the path segment is correct.
     """
+    from urllib.parse import quote, unquote_plus
     env = st.session_state["env"]
     bearer = st.session_state["bearer"]
-    url = f"{env['api_url']}/api/vocabularies/{vocab_code}/concepts/{concept_code}?force=true"
+    safe_code = quote(unquote_plus(concept_code), safe="")
+    url = f"{env['api_url']}/api/vocabularies/{vocab_code}/concepts/{safe_code}?force=true"
     try:
         resp = requests.delete(url, headers={"Authorization": bearer}, timeout=15)
         ok = resp.status_code in (200, 204)
@@ -378,7 +433,7 @@ def _fetch_page(url: str, headers: dict, page: int, retries: int = _SNAPSHOT_RET
     )
 
 
-def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool, str]:
+def create_snapshot_from_api(api_url: str, bearer: str, data_dir, env_label: str = "") -> tuple[bool, str]:
     """
     Fetch all items from all 5 categories and save as full_items_{ts}.json.
     Uses small page sizes and retries to handle slow category endpoints.
@@ -432,29 +487,145 @@ def create_snapshot_from_api(api_url: str, bearer: str, data_dir) -> tuple[bool,
         log_action(f"Snapshot creation failed: {e}", ok=False)
         return False, f"Failed to save snapshot: {e}"
 
+    # Write sidecar metadata so the Data page can show which environment this came from
+    import datetime as _dt
+    meta_path = out_path.with_suffix("").with_suffix(".meta.json")
+    try:
+        with open(meta_path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "source": "api",
+                "env_label": env_label,
+                "api_url": api_url,
+                "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            }, fh, indent=2)
+    except Exception:
+        pass  # metadata is best-effort
+
     msg = f"Created snapshot {out_path.name} with {len(all_items)} items from {api_url}"
     log_action(msg)
     return True, f"Created {out_path.name} with {len(all_items)} items."
 
 
+def _get_actor(actor_id: int, api_url: str, bearer: str) -> dict:
+    """Fetch the full actor record from GET /api/actors/{id}. Raises on error."""
+    resp = requests.get(
+        f"{api_url}/api/actors/{actor_id}",
+        headers={"Authorization": bearer},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _consolidate_actor_payload(actors: list[dict]) -> dict:
+    """
+    Build a PUT-ready ActorCore payload that preserves all attributes across
+    a set of actors being merged. The first actor in the list is the 'keep' actor.
+
+    - name: keep actor's name
+    - email / website: keep actor's value; falls back to first non-empty value
+      from the other actors if the keep actor has none
+    - externalIds: union of all actors', deduped by (service code, identifier)
+    - affiliations: keep actor's affiliations only (affiliations from discarded
+      actors reference actors that will be deleted)
+    """
+    keep = actors[0]
+
+    email = keep.get("email") or ""
+    if not email:
+        email = next((a["email"] for a in actors[1:] if a.get("email")), "")
+
+    website = keep.get("website") or ""
+    if not website:
+        website = next((a["website"] for a in actors[1:] if a.get("website")), "")
+
+    seen: set[tuple] = set()
+    ext_ids: list[dict] = []
+    for actor in actors:
+        for eid in actor.get("externalIds", []):
+            code = eid.get("identifierService", {}).get("code", "")
+            identifier = eid.get("identifier", "")
+            if (code, identifier) not in seen:
+                seen.add((code, identifier))
+                ext_ids.append({
+                    "identifierService": {"code": code},
+                    "identifier": identifier,
+                })
+
+    affiliations = [
+        {"id": aff["id"]}
+        for aff in keep.get("affiliations", [])
+        if aff.get("id")
+    ]
+
+    payload: dict = {"name": keep["name"]}
+    if email:
+        payload["email"] = email
+    if website:
+        payload["website"] = website
+    if ext_ids:
+        payload["externalIds"] = ext_ids
+    if affiliations:
+        payload["affiliations"] = affiliations
+    return payload
+
+
 def merge_actors(keep_id: int, merge_ids: list) -> tuple[bool, str]:
     """
-    POST /api/actors/{keep_id}/merge?with={merge_ids}
-    Returns (success, message).
+    Merge actors into keep_id:
+      1. GET all actors to collect email, website, externalIds
+      2. PUT keep actor with the consolidated attributes
+      3. POST /api/actors/{keep_id}/merge?with={merge_ids}
+    This ensures no data is silently dropped when the discarded actors have
+    attributes the keep actor lacks.
     """
     env = st.session_state["env"]
     bearer = st.session_state["bearer"]
+    api_url = env["api_url"]
+
+    # ── Step 1: fetch all actors ──────────────────────────────────────────────
+    try:
+        actors = [_get_actor(keep_id, api_url, bearer)]
+        for mid in merge_ids:
+            actors.append(_get_actor(mid, api_url, bearer))
+    except Exception as e:
+        return False, f"Failed to fetch actor data before merge: {e}"
+
+    # ── Step 2: consolidate and update keep actor ─────────────────────────────
+    payload = _consolidate_actor_payload(actors)
+    put_url = f"{api_url}/api/actors/{keep_id}"
+    try:
+        put_resp = requests.put(
+            put_url,
+            headers={"Content-Type": "application/json", "Authorization": bearer},
+            json=payload,
+            timeout=15,
+        )
+        put_resp.raise_for_status()
+        log_api("PUT", put_url,
+                f"Consolidate attributes on actor {keep_id} before merge",
+                status=put_resp.status_code,
+                request=str(payload)[:500],
+                response=put_resp.text[:300],
+                ok=True)
+    except Exception as e:
+        log_api("PUT", put_url,
+                f"Failed to consolidate actor {keep_id} before merge",
+                status="error", response=str(e), ok=False)
+        return False, f"Failed to update keep actor before merge: {e}"
+
+    # ── Step 3: merge ─────────────────────────────────────────────────────────
     with_param = ",".join(str(i) for i in merge_ids)
-    url = f"{env['api_url']}/api/actors/{keep_id}/merge?with={with_param}"
+    merge_url = f"{api_url}/api/actors/{keep_id}/merge?with={with_param}"
     try:
         resp = requests.post(
-            url,
+            merge_url,
             headers={"Content-Type": "application/json", "Authorization": bearer},
             timeout=15,
         )
         ok = resp.status_code == 200
         log_api(
-            "POST", url,
+            "POST", merge_url,
             f"Merge actor(s) {merge_ids} into {keep_id}",
             status=resp.status_code,
             response=resp.text[:300],
@@ -464,6 +635,7 @@ def merge_actors(keep_id: int, merge_ids: list) -> tuple[bool, str]:
             return True, f"Actor(s) {merge_ids} merged into {keep_id}."
         return False, f"API returned {resp.status_code}: {resp.text[:200]}"
     except requests.RequestException as e:
-        log_api("POST", url, f"Merge actors {merge_ids} into {keep_id} — request failed",
+        log_api("POST", merge_url,
+                f"Merge actors {merge_ids} into {keep_id} — request failed",
                 status="error", response=str(e), ok=False)
         return False, f"Request failed: {e}"

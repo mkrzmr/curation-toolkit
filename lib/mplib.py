@@ -1,3 +1,12 @@
+"""
+Thin wrapper around the sshmarketplacelib (sshompitor) helper.
+
+The library can be either pip-installed as the `sshmarketplacelib` package
+or used directly from a sibling clone of the sshompitor repository.
+`get_util()` is cached with `st.cache_resource` so the snapshot is loaded
+from disk only once per Streamlit server process.
+"""
+
 import sys
 import pathlib
 import streamlit as st
@@ -14,4 +23,11 @@ except ImportError:
 
 @st.cache_resource(show_spinner="Loading Marketplace snapshot…")
 def get_util() -> Util:
+    """
+    Return a cached Util instance backed by the local snapshot.
+
+    Uses cache_resource (process-level) rather than cache_data (session-level)
+    so the snapshot DataFrame is shared across browser sessions and not
+    re-parsed on every rerun.
+    """
     return Util()

@@ -1,3 +1,36 @@
+"""
+Keyword Curation — inspect and clean the sshoc-keyword vocabulary.
+
+Tabs
+----
+Unused
+  Concepts in the vocabulary not referenced by any item in the current
+  snapshot.  Batch deletion uses force=true because the API keeps full item
+  version history; old revisions may still reference a concept even after it
+  has been removed from the current version.
+
+In use
+  Concepts actively used on items.  Quality filters surface common issues:
+  labels starting with a space, labels without letters, overly long labels.
+  Near-duplicate detection groups concepts that are identical after
+  normalisation (case-fold, hyphens/underscores → space) and offers a
+  one-click merge: re-point all affected items then delete the variants.
+
+Duplicates in other vocabs
+  Keywords whose label already exists as a concept in another vocabulary
+  (e.g. "xml" in sshoc-keyword vs the "standard" vocab).  A fix control
+  re-points affected items to the canonical concept.  Only used keywords
+  are shown; unused ones should be removed via the Unused tab.
+
+All concepts
+  Full vocabulary listing with usage counts and search filter.
+
+Shared state (st.session_state keys)
+  keyword_vocab       – DataFrame of all sshoc-keyword concepts (loaded on demand)
+  all_concepts_cache  – DataFrame of concepts across all vocabularies
+  kw_delete_status    – last batch-delete result {successes, failures}
+"""
+
 import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -139,7 +172,36 @@ with tab_unused:
 
         to_delete = edited[edited["delete"]]["code"].tolist()
 
+        # ── Persisted delete result (survives st.rerun) ───────────────────────
+        _del_status = st.session_state.get("kw_delete_status")
+        if _del_status:
+            if _del_status.get("successes"):
+                labels = ", ".join(f"`{c}`" for c, _ in _del_status["successes"][:5])
+                tail = f" and {len(_del_status['successes']) - 5} more" if len(_del_status["successes"]) > 5 else ""
+                st.success(f"Deleted {len(_del_status['successes'])} concept(s): {labels}{tail}")
+            for code, msg in _del_status.get("failures", []):
+                if "403" in msg:
+                    st.error(
+                        f"`{code}` — 403 Forbidden: the server refused to delete this concept. "
+                        "It may be a system/protected concept, or your account may lack "
+                        "vocabulary administrator privileges."
+                    )
+                else:
+                    st.error(f"`{code}` — {msg}")
+
         if to_delete:
+            sel_rows = (
+                view[view["code"].isin(to_delete)][["code", "label", "uri", "definition"]]
+                .reset_index(drop=True)
+            )
+            st.dataframe(
+                sel_rows.style.set_properties(
+                    **{"background-color": "#ffe0e0", "color": "#8b0000"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={"uri": st.column_config.LinkColumn("URI")},
+            )
             st.error(
                 f"**{len(to_delete)} concept(s) selected for deletion (force=true).** "
                 "This removes the concept from the vocabulary and strips it from any item "
@@ -156,6 +218,7 @@ with tab_unused:
                 disabled=not confirmed,
                 key="btn_delete_concepts",
             ):
+                st.session_state.pop("kw_delete_status", None)
                 successes, failures = [], []
                 bar = st.progress(0, text=f"Deleting… 0 / {len(to_delete)}")
                 for i, code in enumerate(to_delete, 1):
@@ -164,17 +227,15 @@ with tab_unused:
                     bar.progress(i / len(to_delete), text=f"Deleting… {i} / {len(to_delete)}")
                 bar.empty()
 
-                if successes:
-                    st.success(f"Deleted {len(successes)} concept(s).")
-                if failures:
-                    st.warning(f"{len(failures)} concept(s) could not be deleted:")
-                    for code, msg in failures:
-                        st.write(f"- `{code}`: {msg}")
-
+                st.session_state["kw_delete_status"] = {
+                    "successes": successes,
+                    "failures": failures,
+                }
                 deleted_codes = {c for c, _ in successes}
                 st.session_state["keyword_vocab"] = st.session_state["keyword_vocab"][
                     ~st.session_state["keyword_vocab"]["code"].isin(deleted_codes)
                 ].reset_index(drop=True)
+                st.cache_data.clear()
                 st.rerun()
 
         csv = view[["code", "label", "candidate", "uri", "definition"]].to_csv(index=False).encode("utf-8")
@@ -225,6 +286,150 @@ with tab_used:
             "candidate":   st.column_config.CheckboxColumn("Candidate"),
         },
     )
+
+    # ── Near-duplicate detection ──────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Near-duplicate keywords")
+    st.caption(
+        "Groups of keywords that are identical after normalisation: "
+        "case is ignored, hyphens/underscores/slashes are treated as spaces, "
+        "and extra whitespace is collapsed."
+    )
+
+    import re as _re
+
+    def _norm(label: str) -> str:
+        s = str(label).lower().strip()
+        s = _re.sub(r"[-_/\\]", " ", s)
+        s = _re.sub(r"\s+", " ", s)
+        return s
+
+    nd = in_use.copy()
+    nd["_norm"] = nd["label"].apply(_norm)
+    near_groups = nd[nd.duplicated("_norm", keep=False)].groupby("_norm", sort=False)
+
+    if near_groups.ngroups == 0:
+        st.success("No near-duplicate keywords found.")
+    else:
+        st.metric("Near-duplicate groups", near_groups.ngroups)
+        for gi, (norm_key, grp) in enumerate(near_groups):
+            total_items = grp["items_using"].sum()
+            with st.expander(
+                f'"{norm_key}"  —  {len(grp)} variants  ·  {total_items} items total'
+            ):
+                st.dataframe(
+                    grp[["code", "label", "items_using", "candidate", "uri"]].reset_index(drop=True),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "uri":         st.column_config.LinkColumn("URI"),
+                        "items_using": st.column_config.NumberColumn("Items using"),
+                        "candidate":   st.column_config.CheckboxColumn("Candidate"),
+                    },
+                )
+
+                st.markdown("**Merge variants**")
+                keep_col, _ = st.columns([2, 1])
+                codes = grp["code"].tolist()
+                with keep_col:
+                    keep_code = st.selectbox(
+                        "Keep this variant:",
+                        options=codes,
+                        format_func=lambda c: (
+                            f"{grp.loc[grp['code'] == c, 'label'].values[0]}"
+                            f"  ({grp.loc[grp['code'] == c, 'items_using'].values[0]} items)"
+                        ),
+                        key=f"nd_keep_{gi}",
+                    )
+
+                keep_row = grp[grp["code"] == keep_code].iloc[0]
+                merge_codes = [c for c in codes if c != keep_code]
+
+                keep_uri = keep_row["uri"] if pd.notna(keep_row.get("uri")) else ""
+                keep_concept: dict = {
+                    "code": keep_code,
+                    "label": keep_row["label"],
+                    "vocabulary": {"code": "sshoc-keyword"},
+                }
+                if keep_uri:
+                    keep_concept["uri"] = keep_uri
+
+                affected = (
+                    snap_kw[snap_kw["keyword_code"].isin(merge_codes)]
+                    [["persistentId", "category", "item_label", "keyword_code", "keyword_label"]]
+                    .drop_duplicates(["persistentId", "keyword_code"])
+                    .reset_index(drop=True)
+                )
+
+                if affected.empty:
+                    st.info(
+                        "No items reference the non-kept variants. "
+                        "Delete them from the **Unused** tab."
+                    )
+                else:
+                    n_unique = affected["persistentId"].nunique()
+                    st.warning(
+                        f"**{n_unique} item(s)** use the non-kept variant(s) and will be "
+                        f"re-pointed to **{keep_row['label']}**. "
+                        f"The {len(merge_codes)} other variant(s) will then be deleted."
+                    )
+                    with st.expander("Show affected items"):
+                        st.dataframe(
+                            affected[["item_label", "persistentId", "category", "keyword_label"]],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                    confirmed = st.checkbox(
+                        f"I understand: re-point {n_unique} item(s) and delete "
+                        f"{len(merge_codes)} variant(s)",
+                        key=f"nd_confirm_{gi}",
+                    )
+                    if st.button(
+                        f"Merge → keep '{keep_row['label']}'",
+                        type="primary",
+                        disabled=not confirmed,
+                        key=f"nd_merge_{gi}",
+                    ):
+                        errors, successes = [], 0
+                        bar = st.progress(0, text=f"Re-pointing… 0 / {len(affected)}")
+                        for i, (_, row) in enumerate(affected.iterrows(), 1):
+                            ok, msg = fix_item_keyword(
+                                row["category"],
+                                row["persistentId"],
+                                row["keyword_code"],
+                                "keyword",
+                                keep_concept,
+                                env["api_url"],
+                                st.session_state["bearer"],
+                            )
+                            if ok:
+                                successes += 1
+                            else:
+                                errors.append(f"`{row['persistentId']}`: {msg}")
+                            bar.progress(i / len(affected), text=f"Re-pointing… {i} / {len(affected)}")
+                        bar.empty()
+
+                        del_errors = []
+                        for code in merge_codes:
+                            ok, msg = delete_concept(code)
+                            if not ok:
+                                del_errors.append(f"`{code}`: {msg}")
+
+                        if successes:
+                            st.success(f"Re-pointed {successes} item-keyword reference(s).")
+                        if errors:
+                            st.warning("Some re-pointing failed:\n" + "\n".join(errors))
+                        if del_errors:
+                            st.warning("Some deletions failed:\n" + "\n".join(del_errors))
+                        else:
+                            st.success(f"Deleted {len(merge_codes)} variant concept(s).")
+
+                        st.session_state["keyword_vocab"] = st.session_state["keyword_vocab"][
+                            ~st.session_state["keyword_vocab"]["code"].isin(merge_codes)
+                        ].reset_index(drop=True)
+                        st.cache_data.clear()
+                        st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_dupes:

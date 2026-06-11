@@ -1,3 +1,12 @@
+"""
+Known deployment environments for the SSH Open Marketplace.
+
+Each entry maps a human-readable label to the API base URL and the
+public-facing Marketplace URL used to build item deep-links.
+Add new entries here when additional environments (e.g. a dev stack)
+need to be reachable from the toolkit.
+"""
+
 ENVIRONMENTS = {
     "Production": {
         "label": "Production",

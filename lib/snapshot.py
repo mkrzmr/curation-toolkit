@@ -1,3 +1,25 @@
+"""
+Local snapshot management and sidebar data-status widget.
+
+A "snapshot" is a full export of all Marketplace items saved as
+`data/full_items_{unix_ts}.json`.  The toolkit always reads from the
+most recent file in that directory.
+
+Each snapshot is accompanied by a sidecar `full_items_{ts}.meta.json`
+that records the data source (GitHub archive or live API) and the
+environment it was fetched from.  The sidecar is written best-effort;
+missing sidecar files are handled gracefully everywhere.
+
+Public helpers
+--------------
+get_latest_snapshot_info()  – path, age, datetime of the newest snapshot
+fetch_latest_from_github()  – download the newest snapshot from the sshompitor repo
+require_snapshot()          – stop page rendering with a recovery UI if no snapshot exists
+render_data_status()        – render the sidebar data-age badge and refresh button
+read_snapshot_meta(path)    – read the sidecar metadata for a given snapshot file
+"""
+
+import json
 import pathlib
 import datetime
 import requests
@@ -14,6 +36,28 @@ def _parse_ts(filename: str) -> int:
         return int(pathlib.Path(filename).stem.replace("full_items_", ""))
     except ValueError:
         return 0
+
+
+def _meta_path(snapshot_path: pathlib.Path) -> pathlib.Path:
+    return snapshot_path.with_suffix("").with_suffix(".meta.json")
+
+
+def read_snapshot_meta(snapshot_path: pathlib.Path) -> dict:
+    """Return the sidecar metadata dict, or {} if the file does not exist."""
+    p = _meta_path(snapshot_path)
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_snapshot_meta(snapshot_path: pathlib.Path, meta: dict) -> None:
+    try:
+        _meta_path(snapshot_path).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass  # metadata is best-effort; don't break the download
 
 
 def get_latest_snapshot_info() -> tuple:
@@ -81,6 +125,11 @@ def fetch_latest_from_github() -> tuple[bool, str]:
         target.unlink(missing_ok=True)
         return False, f"Write failed: {e}"
 
+    _write_snapshot_meta(target, {
+        "source": "github",
+        "env_label": "Production",
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    })
     return True, f"Downloaded {latest_entry['name']} ({file_size // 1_048_576} MB)."
 
 
@@ -128,7 +177,9 @@ def require_snapshot() -> None:
             if st.button("Create fresh snapshot", use_container_width=True):
                 from lib.api import create_snapshot_from_api
                 with st.spinner("Fetching all items from the Marketplace API…"):
-                    ok, msg = create_snapshot_from_api(env["api_url"], bearer, _DATA_DIR)
+                    ok, msg = create_snapshot_from_api(
+                        env["api_url"], bearer, _DATA_DIR, env_label=env.get("label", "")
+                    )
                 if ok:
                     st.success(msg)
                     st.cache_data.clear()
@@ -143,7 +194,13 @@ def require_snapshot() -> None:
 
 
 def render_data_status() -> None:
-    """Render data-age badge, GitHub refresh button, and log indicator in the sidebar."""
+    """
+    Render the data-status section in the Streamlit sidebar.
+
+    Shows a green/yellow age badge for the active snapshot, a one-click
+    GitHub refresh button, and a count of session log entries.
+    Call this once near the top of every page that uses snapshot data.
+    """
     from lib.logger import get_log
     with st.sidebar:
         st.divider()

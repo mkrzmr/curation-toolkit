@@ -1,3 +1,14 @@
+"""
+Login gate for the SSH Open Marketplace Curation Toolkit.
+
+Authenticates against the chosen Marketplace environment and stores the
+bearer token in st.session_state.  All other pages call require_login()
+which redirects here if the session is not authenticated.
+
+On successful login the user is sent to the Data Source page (1_Data.py)
+where they can verify or refresh the local snapshot before starting work.
+"""
+
 import streamlit as st
 from lib.auth import try_login
 from lib.environments import ENVIRONMENTS, DEFAULT_ENV
