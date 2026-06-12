@@ -440,7 +440,7 @@ All write operations target the environment selected at login.
 
 ### Concept code URL encoding
 
-Concept codes from the API may be form-URL-encoded (spaces as `+`, special characters as `%XX`). Before building a DELETE URL the toolkit decodes the code with `unquote_plus` then re-encodes it with `quote` so the path segment uses standard percent-encoding (`%20` for spaces). This is required for concepts whose labels contain spaces, semicolons, or parentheses.
+Concept codes arrive from the API as plain JSON string values — in JSON `+` is a literal plus sign, not a space. Before building a DELETE URL the toolkit passes the raw code through `urllib.parse.quote(code, safe="")` without any prior decoding step. This encodes `+` as `%2B`, `%` as `%25`, and other special characters accordingly, so the server decodes the path back to the original code string stored in the database. An earlier approach used `unquote_plus` before `quote`, which incorrectly treated `+` as a space and produced `%20` in the URL, causing 404 responses for any concept whose code contains a plus sign (e.g. `10+languages`).
 
 ### Category path mapping
 

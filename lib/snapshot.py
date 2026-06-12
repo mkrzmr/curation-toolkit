@@ -5,7 +5,7 @@ A "snapshot" is a full export of all Marketplace items saved as
 `data/full_items_{unix_ts}.json`.  The toolkit always reads from the
 most recent file in that directory.
 
-Each snapshot is accompanied by a sidecar `full_items_{ts}.meta.json`
+Each snapshot is accompanied by a sidecar `full_items_{ts}.meta`
 that records the data source (GitHub archive or live API) and the
 environment it was fetched from.  The sidecar is written best-effort;
 missing sidecar files are handled gracefully everywhere.
@@ -39,7 +39,7 @@ def _parse_ts(filename: str) -> int:
 
 
 def _meta_path(snapshot_path: pathlib.Path) -> pathlib.Path:
-    return snapshot_path.with_suffix("").with_suffix(".meta.json")
+    return snapshot_path.with_suffix(".meta")
 
 
 def read_snapshot_meta(snapshot_path: pathlib.Path) -> dict:

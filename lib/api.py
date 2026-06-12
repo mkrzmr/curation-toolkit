@@ -372,13 +372,15 @@ def delete_concept(concept_code: str, vocab_code: str = "sshoc-keyword") -> tupl
     force=true is required when the concept is referenced by existing item properties;
     the API will also remove those property references from the affected items.
 
-    Concept codes from the API are form-URL-encoded (spaces as '+', special chars as '%XX').
-    We decode with unquote_plus then re-encode with quote so the path segment is correct.
+    Concept codes come from the API as plain JSON strings (e.g. "10+languages").
+    In JSON, '+' is a literal plus sign, not a space.  We must encode the code as
+    an opaque string — quote() only, no unquote_plus — so that a '+' in the code
+    becomes '%2B' in the URL path and the server decodes it back to the original '+'.
     """
-    from urllib.parse import quote, unquote_plus
+    from urllib.parse import quote
     env = st.session_state["env"]
     bearer = st.session_state["bearer"]
-    safe_code = quote(unquote_plus(concept_code), safe="")
+    safe_code = quote(concept_code, safe="")
     url = f"{env['api_url']}/api/vocabularies/{vocab_code}/concepts/{safe_code}?force=true"
     try:
         resp = requests.delete(url, headers={"Authorization": bearer}, timeout=15)
@@ -489,7 +491,7 @@ def create_snapshot_from_api(api_url: str, bearer: str, data_dir, env_label: str
 
     # Write sidecar metadata so the Data page can show which environment this came from
     import datetime as _dt
-    meta_path = out_path.with_suffix("").with_suffix(".meta.json")
+    meta_path = out_path.with_suffix(".meta")
     try:
         with open(meta_path, "w", encoding="utf-8") as fh:
             json.dump({
